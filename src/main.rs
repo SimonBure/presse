@@ -26,11 +26,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for file_path in (args.input).iter().progress() {
         // Loading the document
         let mut doc = match load_pdf(file_path.to_str().unwrap()) {
-        Ok(doc) => doc,
-        Err(e) => {
-            eprintln!("Failed to load PDF: {}", e);
-            return Err(e.into());
-        }
+            Ok(doc) => doc,
+            Err(e) => {
+                eprintln!("Skipping {}: {}", file_path.display(), e);
+                continue;
+            }
         };
 
         // Compressing the document
