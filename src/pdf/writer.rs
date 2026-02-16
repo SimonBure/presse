@@ -11,6 +11,11 @@ pub fn compress_pdf(doc: &mut Document, name: &str) -> Result<(), Box<dyn std::e
 
     let mut file = File::create(name)?;
 
+    // Optimize before saving
+    Document::delete_zero_length_streams(doc);
+    doc.prune_objects();
+    doc.compress();
+
     doc.save_with_options(&mut file, option)?;
 
     Ok(())
