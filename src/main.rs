@@ -7,15 +7,15 @@ use pdf::writer::compress_pdf;
 use cli::args::Args;
 use clap::Parser;
 
-use indicatif::ProgressBar;
-use std::time::Duration;
+// use indicatif::ProgressBar;
+// use std::time::Duration;
 
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== PRESSE PDF Compression Tool ===\n");
 
-    let bar = ProgressBar::new(100);
-    bar.enable_steady_tick(Duration::from_millis(100));
+    // let bar = ProgressBar::new(100);
+    // bar.enable_steady_tick(Duration::from_millis(100));
 
     let args = Args::parse();
 
@@ -31,15 +31,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Compressing the document
     let output = match args.output {
-        Some(path) => path,
+        Some(path) if path.is_dir() || path.to_str().unwrap().ends_with('/') => {
+            // test.pdf --> outputs/test_compressed.pdf
+            let stem = args.input.file_stem().unwrap().to_str().unwrap();
+            path.join(format!("{}_compressed.pdf", stem))
+        }
+        Some(path) => path,  // test.pdf --> new_name.pdf
         None => {
-            // test.pdf -> test_compressed.pdf
+            // test.pdf -> test_compressed.pdf (in same dir)
             let stem = args.input.file_stem().unwrap().to_str().unwrap();
             let mut path = args.input.clone();
             path.set_file_name(format!("{}_compressed.pdf", stem));
             path
         }
     };
+
+    // Create parent dir if needed
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
     let output_path = output.to_str().unwrap();
     compress_pdf(&mut doc, output_path)?;
 
@@ -51,6 +62,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}kB → {}kB ({:.2}% compression)", original_size, compressed_size, compression_ratio);
     }
 
-    bar.finish();
+    // bar.finish();
     Ok(())
 }
