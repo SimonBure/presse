@@ -1,7 +1,7 @@
 mod cli;
 mod pdf;
 
-use pdf::reader::load_pdf;
+use pdf::reader::{load_pdf, get_pdf_size_in_kilobytes, get_compression_ration_in_percent};
 use pdf::writer::compress_pdf;
 
 use cli::args::Args;
@@ -19,18 +19,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Args::parse();
 
-    // Test 1: Try loading an existing PDF
-    println!("Test 1: Loading PDF...\n");
-    let mut doc = match load_pdf(args.input.to_str().unwrap()) {
+    // Loading the document
+    let input_file = args.input.to_str().unwrap();
+    let mut doc = match load_pdf(input_file) {
         Ok(doc) => doc,
         Err(e) => {
             eprintln!("Failed to load PDF: {}", e);
             return Err(e.into());
         }
     };
-    println!("PDF loaded successfully!");
 
-    println!("Test 1: Compressing PDF...\n");
+    // Compressing the document
     let output = match args.output {
         Some(path) => path,
         None => {
@@ -41,9 +40,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             path
         }
     };
-    // let name = "test_compressed.pdf";
-    compress_pdf(&mut doc, output.to_str().unwrap())?;
-    println!("PDF compressed successfully!");
+    let output_path = output.to_str().unwrap();
+    compress_pdf(&mut doc, output_path)?;
+
+    // Summary
+    let original_size = get_pdf_size_in_kilobytes(input_file).unwrap();
+    let compressed_size = get_pdf_size_in_kilobytes(output_path).unwrap();
+    let compression_ratio = get_compression_ration_in_percent(original_size, compressed_size);
+    println!("{}kB --> {}kB ({:.2}% compression)", original_size, compressed_size, compression_ratio);
 
     bar.finish();
     Ok(())
