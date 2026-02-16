@@ -12,4 +12,8 @@ pub struct Args {
 
     /// Output file (optional, defaults to <input>_compressed.pdf)
     pub output: Option<PathBuf>,
+
+    // Details during the compression process --> sizes comparison before & after
+    #[arg(short, long, default_value_t = false)]
+    pub quiet: bool
 }

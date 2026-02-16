@@ -44,10 +44,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     compress_pdf(&mut doc, output_path)?;
 
     // Summary
-    let original_size = get_pdf_size_in_kilobytes(input_file).unwrap();
-    let compressed_size = get_pdf_size_in_kilobytes(output_path).unwrap();
-    let compression_ratio = get_compression_ration_in_percent(original_size, compressed_size);
-    println!("{}kB --> {}kB ({:.2}% compression)", original_size, compressed_size, compression_ratio);
+    if !args.quiet {
+        let original_size = get_pdf_size_in_kilobytes(input_file).unwrap();
+        let compressed_size = get_pdf_size_in_kilobytes(output_path).unwrap();
+        let compression_ratio = get_compression_ration_in_percent(original_size, compressed_size);
+        println!("{}kB → {}kB ({:.2}% compression)", original_size, compressed_size, compression_ratio);
+    }
 
     bar.finish();
     Ok(())
