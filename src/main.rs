@@ -7,9 +7,15 @@ use pdf::writer::compress_pdf;
 use cli::args::Args;
 use clap::Parser;
 
+use indicatif::ProgressBar;
+use std::time::Duration;
+
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== PRESSE PDF Compression Tool ===\n");
+
+    let bar = ProgressBar::new(100);
+    bar.enable_steady_tick(Duration::from_millis(100));
 
     let args = Args::parse();
 
@@ -37,6 +43,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     // let name = "test_compressed.pdf";
     compress_pdf(&mut doc, output.to_str().unwrap())?;
+    println!("PDF compressed successfully!");
 
+    bar.finish();
     Ok(())
 }
