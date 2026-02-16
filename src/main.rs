@@ -28,8 +28,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+
+    // Create output dir if needed (once)
+    if let Some(ref path) = args.output {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        // If -o is a directory itself (ends with /)
+        if path.to_str().unwrap().ends_with('/') {
+            std::fs::create_dir_all(path)?;
+        }
+    }
     
-    for file_path in args.input {
+    for file_path in &args.input {
         // Loading the document
         let mut doc = match load_pdf(file_path.to_str().unwrap()) {
             Ok(doc) => doc,
@@ -40,34 +53,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         // Compressing the document
-        let output = match &args.output {
-            Some(path) if path.is_dir() || path.to_str().unwrap().ends_with('/') => {
-                // test.pdf --> outputs/test_compressed.pdf
-                let stem = file_path.file_stem().unwrap().to_str().unwrap();
-                path.join(format!("{}_compressed.pdf", stem))
-            }
-            Some(path) => path.clone(),  // test.pdf --> new_name.pdf
-            None => {
-                // test.pdf -> test_compressed.pdf (in same dir)
-                let stem = file_path.file_stem().unwrap().to_str().unwrap();
-                let mut path = file_path.clone();
-                path.set_file_name(format!("{}_compressed.pdf", stem));
-                path
-            }
-        };
-
-        // Create parent dir if needed
-        if let Some(parent) = output.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let output_path = output.to_str().unwrap();
-        compress_pdf(&mut doc, output_path)?;
+        let output = args.resolve_output(&file_path);
+        compress_pdf(&mut doc, output.to_str().unwrap())?;
 
         // Compression summary
         if !args.quiet {
             let original_size = get_pdf_size_in_kilobytes(file_path.to_str().unwrap()).unwrap();
-            let compressed_size = get_pdf_size_in_kilobytes(output_path).unwrap();
+            let compressed_size = get_pdf_size_in_kilobytes(output.to_str().unwrap()).unwrap();
             let compression_ratio = get_compression_ration_in_percent(original_size, compressed_size);
             bar.println(format!("{}kB → {}kB ({:.2}% compression)", original_size, compressed_size, compression_ratio));
         }
