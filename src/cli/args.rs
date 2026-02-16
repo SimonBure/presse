@@ -8,9 +8,10 @@ use std::path::PathBuf;
 
 pub struct Args {
     /// Input file
-    pub input: PathBuf,
+    pub input: Vec<PathBuf>,
 
     /// Output file (optional, defaults to <input>_compressed.pdf)
+    #[arg(short, long)]
     pub output: Option<PathBuf>,
 
     // Details during the compression process --> sizes comparison before & after

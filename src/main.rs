@@ -7,61 +7,65 @@ use pdf::writer::compress_pdf;
 use cli::args::Args;
 use clap::Parser;
 
-// use indicatif::ProgressBar;
-// use std::time::Duration;
+use indicatif::ProgressIterator;
 
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== PRESSE PDF Compression Tool ===\n");
-
-    // let bar = ProgressBar::new(100);
-    // bar.enable_steady_tick(Duration::from_millis(100));
-
     let args = Args::parse();
 
-    // Loading the document
-    let input_file = args.input.to_str().unwrap();
-    let mut doc = match load_pdf(input_file) {
+    // Fail if multiple files + output are given & output is not a dir 
+    if args.input.len() > 1 {
+        if let Some(ref path) = args.output {
+            if !path.is_dir() && !path.to_str().unwrap().ends_with('/') {
+                eprintln!("Error: -o must be a directory when compressing multiple documents");
+                std::process::exit(1);
+            }
+        }
+    }
+    
+    for file_path in (args.input).iter().progress() {
+        // Loading the document
+        let mut doc = match load_pdf(file_path.to_str().unwrap()) {
         Ok(doc) => doc,
         Err(e) => {
             eprintln!("Failed to load PDF: {}", e);
             return Err(e.into());
         }
-    };
+        };
 
-    // Compressing the document
-    let output = match args.output {
-        Some(path) if path.is_dir() || path.to_str().unwrap().ends_with('/') => {
-            // test.pdf --> outputs/test_compressed.pdf
-            let stem = args.input.file_stem().unwrap().to_str().unwrap();
-            path.join(format!("{}_compressed.pdf", stem))
-        }
-        Some(path) => path,  // test.pdf --> new_name.pdf
-        None => {
-            // test.pdf -> test_compressed.pdf (in same dir)
-            let stem = args.input.file_stem().unwrap().to_str().unwrap();
-            let mut path = args.input.clone();
-            path.set_file_name(format!("{}_compressed.pdf", stem));
-            path
-        }
-    };
+        // Compressing the document
+        let output = match &args.output {
+            Some(path) if path.is_dir() || path.to_str().unwrap().ends_with('/') => {
+                // test.pdf --> outputs/test_compressed.pdf
+                let stem = file_path.file_stem().unwrap().to_str().unwrap();
+                path.join(format!("{}_compressed.pdf", stem))
+            }
+            Some(path) => path.clone(),  // test.pdf --> new_name.pdf
+            None => {
+                // test.pdf -> test_compressed.pdf (in same dir)
+                let stem = file_path.file_stem().unwrap().to_str().unwrap();
+                let mut path = file_path.clone();
+                path.set_file_name(format!("{}_compressed.pdf", stem));
+                path
+            }
+        };
 
-    // Create parent dir if needed
-    if let Some(parent) = output.parent() {
-        std::fs::create_dir_all(parent)?;
+        // Create parent dir if needed
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let output_path = output.to_str().unwrap();
+        compress_pdf(&mut doc, output_path)?;
+
+        // Compression summary
+        if !args.quiet {
+            let original_size = get_pdf_size_in_kilobytes(file_path.to_str().unwrap()).unwrap();
+            let compressed_size = get_pdf_size_in_kilobytes(output_path).unwrap();
+            let compression_ratio = get_compression_ration_in_percent(original_size, compressed_size);
+            println!("{}kB → {}kB ({:.2}% compression)", original_size, compressed_size, compression_ratio);
+        }
     }
 
-    let output_path = output.to_str().unwrap();
-    compress_pdf(&mut doc, output_path)?;
-
-    // Summary
-    if !args.quiet {
-        let original_size = get_pdf_size_in_kilobytes(input_file).unwrap();
-        let compressed_size = get_pdf_size_in_kilobytes(output_path).unwrap();
-        let compression_ratio = get_compression_ration_in_percent(original_size, compressed_size);
-        println!("{}kB → {}kB ({:.2}% compression)", original_size, compressed_size, compression_ratio);
-    }
-
-    // bar.finish();
     Ok(())
 }
