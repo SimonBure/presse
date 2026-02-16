@@ -8,10 +8,8 @@ use std::path::PathBuf;
 
 pub struct Args {
     /// Input file
-    #[arg(short, long)]
     pub input: PathBuf,
 
-    /// Output file
-    #[arg(short, long)]
-    pub output: PathBuf,
+    /// Output file (optional, defaults to <input>_compressed.pdf)
+    pub output: Option<PathBuf>,
 }

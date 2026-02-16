@@ -25,8 +25,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("PDF loaded successfully!");
 
     println!("Test 1: Compressing PDF...\n");
+    let output = match args.output {
+        Some(path) => path,
+        None => {
+            // test.pdf -> test_compressed.pdf
+            let stem = args.input.file_stem().unwrap().to_str().unwrap();
+            let mut path = args.input.clone();
+            path.set_file_name(format!("{}_compressed.pdf", stem));
+            path
+        }
+    };
     // let name = "test_compressed.pdf";
-    compress_pdf(&mut doc, args.output.to_str().unwrap())?;
+    compress_pdf(&mut doc, output.to_str().unwrap())?;
 
     Ok(())
 }
