@@ -10,13 +10,6 @@ lopdf = "0.39.0"
 # CLI
 clap = { version = "4", features = ["derive"] }
 
-# Batch processing
-walkdir = "2"
-rayon = "1.10"
-
 # Progress bar
 indicatif = "0.17"
-
-# Error handling
-thiserror = "2.0"
 image = "0.25.9"

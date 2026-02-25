@@ -3,7 +3,8 @@ use image::DynamicImage;
 use image::codecs::jpeg::{JpegEncoder};
 
 
-/// Replace images in a document by a compressed version to the given quality.
+/// Replace JPEG images in a document by a compressed version to the given quality.
+/// Only JPEG images are replaced, the other are skipped.
 pub fn compress_images(doc: &mut Document, quality: u8){
     let image_ids: Vec<lopdf::ObjectId> = doc.objects.iter()
     .filter_map(|(id, obj)| match obj {
@@ -12,6 +13,8 @@ pub fn compress_images(doc: &mut Document, quality: u8){
         _ => None,
     })
     .collect();
+
+    eprintln!("Found {} image(s)", image_ids.len());
 
     for id in image_ids {
         if let Ok(Object::Stream(stream)) = doc.get_object_mut(id) {
@@ -77,10 +80,13 @@ pub fn compress_images(doc: &mut Document, quality: u8){
                     };
                 }
             }
+            eprintln!("Image {:?}: {} bytes → {} bytes", id, stream.content.len(), buf.len());
             // Update the stream object with the new image
+            if buf.len() < stream.content.len() {
             stream.content = buf;
             stream.dict.set(b"Filter", Object::Name(b"DCTDecode".to_vec()));
             stream.dict.set(b"Length", Object::Integer(stream.content.len() as i64));
+            }
 
         }
     }
