@@ -1,66 +1,63 @@
 # presse
 
-A fast and friendly command-line tool for PDF compression, written in Rust.
-
-> **Status:** Early development. Not yet published to crates.io.
+A fast command-line tool for PDF compression, written in Rust.
 
 ## Features
 
-- **PDF compression** -- Object stream packing, xref stream compression, unused object removal, and zero-length stream cleanup. Image recompression is planned.
-- **Batch processing** -- Compress multiple files in one command. Supports shell wildcards.
-- **Smart output paths** -- Default naming (`file_compressed.pdf`), explicit output (`-o name.pdf`), or output to a directory (`-o dir/`).
+- **Image recompression** — re-encodes images at a target quality, skipping CMYK images
+- **Structural compression** — object stream packing, xref stream compression, unused object removal
+- **Batch processing** — compress multiple files in one command via shell wildcards
+- **Smart output paths** — sensible defaults, explicit naming, or output to a directory
 
 ## Installation
 
-Clone and build from source:
-
 ```bash
-git clone https://github.com/your-username/presse.git
-cd presse
-cargo build --release
+cargo install presse
 ```
 
-The binary will be at `target/release/presse`.
-
-## Usage (planned)
+## Usage
 
 ```bash
-# Single file (outputs test_compressed.pdf)
-presse test.pdf
+# Single file — outputs document_compressed.pdf alongside the original
+presse document.pdf
 
-# Single file with custom output name
-presse test.pdf -o small.pdf
+# Custom output name
+presse document.pdf -o small.pdf
 
 # Output to a directory
-presse test.pdf -o output/
+presse document.pdf -o compressed/
 
-# Multiple files
-presse file1.pdf file2.pdf file3.pdfWrite the readme.md 
-
-# Wildcard
-presse *.pdf
-
-# Batch into a directory
+# Batch — multiple files into a directory
 presse *.pdf -o compressed/
 
-# Quiet mode (no output)
-presse test.pdf -q
+# Set JPEG quality (0–100, default 80)
+presse document.pdf --quality 60
+
+# Suppress output
+presse document.pdf --verbose false
 ```
 
-## Roadmap
+## Options
 
-- [ ] Image extraction and JPEG recompression
-- [ ] Quality presets (screen, ebook, print, prepress)
-- [ ] Verbose mode with per-image compression details
-- [ ] Font subsetting for oversized embedded fonts
-- [ ] Parallel processing with rayon
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o, --output` | `<input>_compressed.pdf` | Output file or directory |
+| `-q, --quality` | `80` | Image recompression quality (0–100) |
+| `-v, --verbose` | `true` | Print size comparison after each file |
+
+## Limitations
+
+- CMYK images are not compressed (not currently handled by `image` crate)
 
 ## Dependencies
 
-- [lopdf](https://github.com/niclasberg/lopdf) -- PDF parsing and manipulation
-- [clap](https://github.com/clap-rs/clap) -- CLI argument parsing
-- [indicatif](https://github.com/console-rs/indicatif) -- Progress bars
+- [lopdf](https://github.com/niclasberg/lopdf) — PDF parsing and manipulation
+- [clap](https://github.com/clap-rs/clap) — CLI argument parsing
+- [indicatif](https://github.com/console-rs/indicatif) — Progress bars
+- [image](https://github.com/image-rs/image) — JPEG decoding and encoding
+
+## Contributions
+We are happy to welcome contributions! The next step we have in mind is to migrate to subcommands to implement document merging or splitting in a single CLI! Pull requests are welcome.
 
 ## License
-
-MIT
+[GPL-3.0](LICENSE)

@@ -26,7 +26,7 @@ pub fn compress_images(doc: &mut Document, quality: u8){
             .and_then(|f| f.as_name())
             .ok();
             if color_space == Some(b"DeviceCMYK") {
-                eprintln!("CMYK image detected, not currently handled by image crate, skipping");
+                eprintln!("Image {:?} is CMYK, skipping", id);
                 continue
             }
             
