@@ -14,7 +14,7 @@ pub fn compress_images(doc: &mut Document, quality: u8){
     })
     .collect();
 
-    eprintln!("Found {} image(s)", image_ids.len());
+    // eprintln!("Found {} image(s)", image_ids.len());
 
     for id in image_ids {
         if let Ok(Object::Stream(stream)) = doc.get_object_mut(id) {
@@ -80,7 +80,7 @@ pub fn compress_images(doc: &mut Document, quality: u8){
                     };
                 }
             }
-            eprintln!("Image {:?}: {} bytes → {} bytes", id, stream.content.len(), buf.len());
+            // eprintln!("Image {:?}: {} bytes → {} bytes", id, stream.content.len(), buf.len());
             // Update the stream object with the new image
             if buf.len() < stream.content.len() {
             stream.content = buf;
