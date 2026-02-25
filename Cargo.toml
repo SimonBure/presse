@@ -19,3 +19,4 @@ indicatif = "0.17"
 
 # Error handling
 thiserror = "2.0"
+image = "0.25.9"

@@ -1,7 +1,7 @@
 use lopdf::{Document, SaveOptions};
 use std::fs::File;
 
-pub fn compress_pdf(doc: &mut Document, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn compress_and_save_pdf(doc: &mut Document, name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let option: SaveOptions = SaveOptions::builder()
         .use_object_streams(true)
         .use_xref_streams(true)

@@ -14,9 +14,13 @@ pub struct Args {
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
+    /// Target quality for lossy image compression
+    #[arg(short, long, default_value_t = 80)]
+    pub quality: u8,
+
     // Details during the compression process --> sizes comparison before & after
-    #[arg(short, long, default_value_t = false)]
-    pub quiet: bool
+    #[arg(short, long, default_value_t = true)]
+    pub verbose: bool
 }
 
 impl Args {

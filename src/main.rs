@@ -2,7 +2,8 @@ mod cli;
 mod pdf;
 
 use pdf::reader::{load_pdf, get_pdf_size_in_kilobytes, get_compression_ration_in_percent};
-use pdf::writer::compress_pdf;
+use pdf::writer::compress_and_save_pdf;
+use pdf::images::compress_images;
 
 use cli::args::Args;
 use clap::Parser;
@@ -51,13 +52,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
         };
+    
+        compress_images(&mut doc, args.quality);
 
         // Compressing the document
         let output = args.resolve_output(&file_path);
-        compress_pdf(&mut doc, output.to_str().unwrap())?;
+        compress_and_save_pdf(&mut doc, output.to_str().unwrap())?;
 
         // Compression summary
-        if !args.quiet {
+        if args.verbose {
             let original_size = get_pdf_size_in_kilobytes(file_path.to_str().unwrap()).unwrap();
             let compressed_size = get_pdf_size_in_kilobytes(output.to_str().unwrap()).unwrap();
             let compression_ratio = get_compression_ration_in_percent(original_size, compressed_size);
