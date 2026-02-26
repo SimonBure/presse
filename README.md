@@ -2,6 +2,8 @@
 
 A fast command-line tool for PDF compression, written in Rust.
 
+Compress PDF files naturally and easily with this ready-to-use command line tool. You don't want to send your sensitive documents online? Ghostscript is too obscure to use? Presse is the answer! Its usage is very intuitive. Images are decoded, compressed and then re-encoded without intermediate steps, making it fast and reliable. Future features are on the roadmap (maybe from a contributor like you?) for PDF merging, splitting and extraction!
+
 ## Features
 
 - **Image recompression** — re-encodes images at a target quality, skipping CMYK images

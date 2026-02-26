@@ -1,10 +1,12 @@
 [package]
 name = "presse"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Fast PDF compression CLI — JPEG recompression and structural optimization"
 license = "GPL-3.0"
 repository = "https://github.com/SimonBure/presse"
+keywords = ["pdf", "compression", "cli", "images", "optimization"]
+categories = ["command-line-utilities", "compression"]
 
 [dependencies]
 # PDF manipulation
