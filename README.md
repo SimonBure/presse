@@ -17,6 +17,17 @@ Compress PDF files naturally and easily with this ready-to-use command line tool
 cargo install presse
 ```
 
+## Benchmark
+
+Measured over 19 real-world PDFs, comparing `presse --quality 50` against Ghostscript `/ebook`.
+
+| | presse | ghostscript |
+|---|---|---|
+| Mean execution time | **0.135s** | 0.927s |
+| Mean size reduction | **+19.2%** | -10.2% |
+
+Presse is **~7× faster** and compresses more effectively on this corpus. Ghostscript's `/ebook` preset can inflate already-optimised documents by downsampling images that are below its target DPI.
+
 ## Usage
 
 ```bash

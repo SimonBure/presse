@@ -26,3 +26,8 @@ target
 
 # Exclude generated or test files
 *.pdf
+
+results/
+
+benchmark/
+benchmark/!*.pdf
