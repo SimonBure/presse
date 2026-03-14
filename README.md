@@ -1,3 +1,6 @@
+[![Crates.io](https://img.shields.io/crates/v/presse.svg)](https://crates.io/crates/presse)
+![demo](demo/demo.gif)
+
 # presse
 
 A fast command-line tool for PDF compression, written in Rust.
