@@ -1,7 +1,7 @@
 mod cli;
 mod pdf;
 
-use pdf::reader::{load_pdf, get_pdf_size_in_kilobytes, get_compression_ration_in_percent};
+use pdf::reader::{load_pdf, get_pdf_size_in_kilobytes, get_compression_ratio_in_percent};
 use pdf::writer::compress_and_save_pdf;
 use pdf::images::compress_images;
 
@@ -63,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if args.verbose {
             let original_size = get_pdf_size_in_kilobytes(file_path.to_str().unwrap()).unwrap();
             let compressed_size = get_pdf_size_in_kilobytes(output.to_str().unwrap()).unwrap();
-            let compression_ratio = get_compression_ration_in_percent(original_size, compressed_size);
+            let compression_ratio = get_compression_ratio_in_percent(original_size, compressed_size);
             bar.println(format!("{}kB → {}kB ({:.2}% compression)", original_size, compressed_size, compression_ratio));
         }
 
