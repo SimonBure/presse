@@ -1,8 +1,0 @@
-I fell asleep halfway through gs command so I built a PDF compression CLI with Rust
-
-Sending my docs online for compression always felt wrong to me. And because I don't have a PhD in flags, `gs` always felt like a Rube Goldberg machine...
-
-So I built presse with Rust in just a few days. I wanted a tool that felt good to use! 
-As simple as `presse input.pdf`! You can install it with `cargo install presse`, it's already online :)
-I've benchmarked it over 19 pdfs and it's 87% faster than Ghostscript 10.01.2 on my machine (Framework 13 Intel Core Ultra). On my corpus, GS /ebook actually inflated some files while presse averaged 19% reduction (--quality 50).
-The repo is here: https://github.com/SimonBure/presse and it's under GPL 3.0, so try it out and let me know what breaks! 
