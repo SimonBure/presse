@@ -74,5 +74,5 @@ fn is_image_stream(stream: &Stream) -> bool {
     stream.dict.get(b"Subtype")
         .and_then(|s| s.as_name())
         .ok()
-        .map_or(false, |name| name == b"Image")
+        .is_some_and(|name| name == b"Image")
 }

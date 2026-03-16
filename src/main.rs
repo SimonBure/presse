@@ -21,22 +21,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Fail if multiple files + output are given & output is not a dir 
-    if args.input.len() > 1 {
-        if let Some(ref path) = args.output {
-            if !path.is_dir() && !path.to_str().unwrap().ends_with('/') {
+    if args.input.len() > 1
+        && let Some(ref path) = args.output
+            && !path.is_dir() && !path.to_str().unwrap().ends_with('/') {
                 eprintln!("Error: -o must be a directory when compressing multiple documents");
                 std::process::exit(1);
             }
-        }
-    }
 
     // Create output dir if needed (once)
     if let Some(ref path) = args.output {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)?;
             }
-        }
         // If -o is a directory itself (ends with /)
         if path.to_str().unwrap().ends_with('/') {
             std::fs::create_dir_all(path)?;
@@ -56,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         compress_images(&mut doc, args.quality);
 
         // Compressing the document
-        let output = args.resolve_output(&file_path);
+        let output = args.resolve_output(file_path);
         compress_and_save_pdf(&mut doc, output.to_str().unwrap())?;
 
         // Compression summary
