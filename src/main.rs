@@ -53,11 +53,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
     
-        compress_images(&mut doc, args.quality);
+        compress_images(&mut doc, args.quality, args.verbose);
 
         // Compressing the document
         let output = args.resolve_output(&file_path);
-        compress_and_save_pdf(&mut doc, output.to_str().unwrap())?;
+        compress_and_save_pdf(&mut doc, output.to_str().unwrap(), args.verbose)?;
 
         // Compression summary
         if args.verbose {
