@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 /// Fast PDF compression tool - easier and faster than ghostscript
@@ -19,7 +19,7 @@ pub struct Args {
     pub quality: u8,
 
     // Details during the compression process --> sizes comparison before & after
-    #[arg(short, long, default_value_t = true)]
+    #[arg(short, long, default_value_t = false)]
     pub verbose: bool
 }
 
