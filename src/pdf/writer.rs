@@ -31,3 +31,10 @@ pub fn compress_and_save_pdf(doc: &mut Document, name: &str, verbose: bool) -> R
 
     Ok(())
 }
+
+pub fn save_pdf(doc: &mut Document, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    Document::delete_zero_length_streams(doc);
+    doc.compress();
+    doc.save(name)?;
+    Ok(())
+}

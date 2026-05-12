@@ -2,7 +2,7 @@ mod cli;
 mod pdf;
 
 use pdf::reader::{load_pdf, get_pdf_size_in_kilobytes, get_compression_ratio_in_percent};
-use pdf::writer::compress_and_save_pdf;
+use pdf::writer::{compress_and_save_pdf, save_pdf};
 use pdf::images::compress_images;
 use pdf::merger::merge;
 
@@ -89,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let output = resolve_merge_path_output(&output, compress);
 
             let mut merged = merge(documents)?;
-            compress_and_save_pdf(&mut merged, output.to_str().unwrap(), false)?;
+            save_pdf(&mut merged, output.to_str().unwrap())?;
         }
     }
 
