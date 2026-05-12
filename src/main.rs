@@ -23,22 +23,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap()
             );
 
-            // Fail if multiple files + output are given & output is not a dir 
-            if input.len() > 1 {
-                if let Some(ref path) = output {
-                    if !path.is_dir() && !path.to_str().unwrap().ends_with('/') {
-                        eprintln!("Error: -o must be a directory when compressing multiple documents");
-                        std::process::exit(1);
-                    }
-                }
+            // Fail if multiple files + output are given & output is not a dir
+            if input.len() > 1
+                && let Some(ref path) = output
+                && !path.is_dir() && !path.to_str().unwrap().ends_with('/') {
+                eprintln!("Error: -o must be a directory when compressing multiple documents");
+                std::process::exit(1);
             }
 
             // Create output dir if needed (once)
             if let Some(ref path) = output {
-                if let Some(parent) = path.parent() {
-                    if !parent.as_os_str().is_empty() {
-                        std::fs::create_dir_all(parent)?;
-                    }
+                if let Some(parent) = path.parent()
+                    && !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent)?;
                 }
                 // If -o is a directory itself (ends with /)
                 if path.to_str().unwrap().ends_with('/') {
@@ -81,8 +78,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // If compress => compress all inputs first then merge. If not, just merge.
             if compress {
-                for mut doc in &mut documents {
-                    compress_images(&mut doc, 50, false);
+                for doc in &mut documents {
+                    compress_images(doc, 50, false);
                 }
             }
 

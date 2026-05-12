@@ -1,11 +1,10 @@
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Fast PDF compression tool - easier and faster than ghostscript
 #[derive(Parser)]
 #[command(name = "presse")]
 #[command(author, version, about, long_about = None)]
-
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -45,37 +44,29 @@ pub enum Commands {
     },
 }
 
-pub fn resolve_press_path_output(file_path: &PathBuf, output: &Option<PathBuf>) -> PathBuf {
-    let output = match output {
+pub fn resolve_press_path_output(file_path: &Path, output: &Option<PathBuf>) -> PathBuf {
+    match output {
         Some(path) if path.is_dir() || path.to_str().unwrap().ends_with('/') => {
-            // test.pdf --> outputs/test_compressed.pdf
             let stem = file_path.file_stem().unwrap().to_str().unwrap();
             path.join(format!("{}_compressed.pdf", stem))
         }
-        Some(path) => path.clone(), // test.pdf --> new_name.pdf
+        Some(path) => path.clone(),
         None => {
-            // test.pdf -> test_compressed.pdf (in same dir)
             let stem = file_path.file_stem().unwrap().to_str().unwrap();
-            let mut path = file_path.clone();
+            let mut path = file_path.to_path_buf();
             path.set_file_name(format!("{}_compressed.pdf", stem));
             path
         }
-    };
-    return output;
+    }
 }
 
 pub fn resolve_merge_path_output(output: &Option<PathBuf>, compress: bool) -> PathBuf {
     let default_name = if compress { "compressed_merged.pdf" } else { "merged.pdf" };
-    let output = match output {
+    match output {
         Some(path) if path.is_dir() || path.to_str().unwrap().ends_with('/') => {
-            // --> outputs/{file_name}.pdf
             path.join(default_name)
         }
         Some(path) => path.clone(),
-        None => {
-            // --> merged_doc.pdf (in current dir)
-            PathBuf::from(default_name)
-        }
-    };
-    return output;
+        None => PathBuf::from(default_name),
+    }
 }

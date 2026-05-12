@@ -162,13 +162,11 @@ pub fn compress_images(doc: &mut Document, quality: u8, verbose: bool) {
                 stream.content = buf;
                 stream.dict.set(b"Filter", Object::Name(b"DCTDecode".to_vec()));
                 stream.dict.set(b"Length", Object::Integer(stream.content.len() as i64));
-            } else {
-                if verbose {
-                    eprintln!(
-                        "[img {:?}] → skipped: re-encoded ({}B) not smaller than original ({}B)",
-                        id, buf.len(), stream.content.len()
-                    );
-                }
+            } else if verbose {
+                eprintln!(
+                    "[img {:?}] → skipped: re-encoded ({}B) not smaller than original ({}B)",
+                    id, buf.len(), stream.content.len()
+                );
             }
         }
     }
@@ -179,5 +177,5 @@ fn is_image_stream(stream: &Stream) -> bool {
     stream.dict.get(b"Subtype")
         .and_then(|s| s.as_name())
         .ok()
-        .map_or(false, |name| name == b"Image")
+        .is_some_and(|name| name == b"Image")
 }
