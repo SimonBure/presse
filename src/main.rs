@@ -4,8 +4,9 @@ mod pdf;
 use pdf::reader::{load_pdf, get_pdf_size_in_kilobytes, get_compression_ratio_in_percent};
 use pdf::writer::compress_and_save_pdf;
 use pdf::images::compress_images;
+use pdf::merger::merge;
 
-use cli::args::{Cli, Commands, resolve_output};
+use cli::args::{Cli, Commands, resolve_press_path_output, resolve_merge_path_output};
 use clap::Parser;
 
 use indicatif::{ProgressBar, ProgressStyle};
@@ -54,11 +55,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                 };
-            
+
                 compress_images(&mut doc, quality, verbose);
 
                 // Compressing the document
-                let output = resolve_output(file_path, &output);
+                let output = resolve_press_path_output(file_path, &output);
                 compress_and_save_pdf(&mut doc, output.to_str().unwrap(), verbose)?;
 
                 // Compression summary
@@ -73,6 +74,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             bar.finish_with_message("Done");
+        }
+
+        Commands::Merge { input, output, compress } => {
+            let mut documents: Vec<_> = input.iter().map(|path| load_pdf(path.to_str().unwrap()).unwrap()).collect();
+
+            // If compress => compress all inputs first then merge. If not, just merge.
+            if compress {
+                for mut doc in &mut documents {
+                    compress_images(&mut doc, 50, false);
+                }
+            }
+
+            let output = resolve_merge_path_output(&output, compress);
+
+            let mut merged = merge(documents)?;
+            compress_and_save_pdf(&mut merged, output.to_str().unwrap(), false)?;
         }
     }
 

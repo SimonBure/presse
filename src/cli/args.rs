@@ -30,9 +30,22 @@ pub enum Commands {
         #[arg(short, long, default_value_t = false)]
         verbose: bool,
     },
+
+    Merge {
+        /// Input files (>= 2, order matters)
+        input: Vec<PathBuf>,
+
+        /// Output file (optional, defaults to <input>_merged.pdf)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Compress the merged file
+        #[arg(short, long, default_value_t = false)]
+        compress: bool,
+    },
 }
 
-pub fn resolve_output(file_path: &PathBuf, output: &Option<PathBuf>) -> PathBuf {
+pub fn resolve_press_path_output(file_path: &PathBuf, output: &Option<PathBuf>) -> PathBuf {
     let output = match output {
         Some(path) if path.is_dir() || path.to_str().unwrap().ends_with('/') => {
             // test.pdf --> outputs/test_compressed.pdf
@@ -46,6 +59,22 @@ pub fn resolve_output(file_path: &PathBuf, output: &Option<PathBuf>) -> PathBuf 
             let mut path = file_path.clone();
             path.set_file_name(format!("{}_compressed.pdf", stem));
             path
+        }
+    };
+    return output;
+}
+
+pub fn resolve_merge_path_output(output: &Option<PathBuf>, compress: bool) -> PathBuf {
+    let default_name = if compress { "compressed_merged.pdf" } else { "merged.pdf" };
+    let output = match output {
+        Some(path) if path.is_dir() || path.to_str().unwrap().ends_with('/') => {
+            // --> outputs/{file_name}.pdf
+            path.join(default_name)
+        }
+        Some(path) => path.clone(),
+        None => {
+            // --> merged_doc.pdf (in current dir)
+            PathBuf::from(default_name)
         }
     };
     return output;
