@@ -9,22 +9,13 @@ pub fn compress_and_save_pdf(doc: &mut Document, name: &str, verbose: bool) -> R
         .compression_level(9)
         .build();
 
-    if verbose {
-        eprintln!("[writer] {} objects before cleanup", doc.objects.len());
-    }
-
+    verbose!(verbose, "[writer] {} objects before cleanup", doc.objects.len());
     Document::delete_zero_length_streams(doc);
-
-    if verbose {
-        eprintln!("[writer] {} objects after cleanup", doc.objects.len());
-    }
+    verbose!(verbose, "[writer] {} objects after cleanup", doc.objects.len());
 
     doc.compress();
 
-    if verbose {
-        eprintln!("[writer] saving to '{}'", name);
-    }
-
+    verbose!(verbose, "[writer] saving to '{}'", name);
     let mut file = File::create(name)?;
     doc.save_with_options(&mut file, option)
         .map_err(|e| format!("save_with_options failed for '{}': {}", name, e))?;

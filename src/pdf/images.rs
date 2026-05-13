@@ -12,9 +12,7 @@ pub fn compress_images(doc: &mut Document, quality: u8, verbose: bool) {
         })
         .collect();
 
-    if verbose {
-        eprintln!("[images] Found {} image object(s)", image_ids.len());
-    }
+    verbose!(verbose, "[images] Found {} image object(s)", image_ids.len());
 
     for id in image_ids {
         if let Ok(Object::Stream(stream)) = doc.get_object_mut(id) {
@@ -41,28 +39,24 @@ pub fn compress_images(doc: &mut Document, quality: u8, verbose: bool) {
                 .map(|c| String::from_utf8_lossy(c).into_owned())
                 .unwrap_or_else(|| "unknown".to_string());
 
-            if verbose {
-                eprintln!(
-                    "[img {:?}] filter={} colorspace={} size={}x{} raw_content={}B",
-                    id,
-                    filter_str.as_deref().unwrap_or("none"),
-                    color_str,
-                    width, height,
-                    stream.content.len()
-                );
-            }
+            verbose!(verbose,
+                "[img {:?}] filter={} colorspace={} size={}x{} raw_content={}B",
+                id,
+                filter_str.as_deref().unwrap_or("none"),
+                color_str,
+                width, height,
+                stream.content.len()
+            );
 
             // CMYK images not yet supported by image crate
             if color_space_raw == Some(b"DeviceCMYK") {
-                if verbose {
-                    eprintln!("[img {:?}] → skipped: CMYK not supported", id);
-                }
+                verbose!(verbose, "[img {:?}] → skipped: CMYK not supported", id);
                 continue;
             }
 
-            // Resolve the effective filter. PDF allows Filter to be a Name or a
-            // single-element Array — both mean the same thing. A multi-element Array
-            // is a filter pipeline (e.g. [FlateDecode, DCTDecode]) which we skip.
+            // Resolve the effective image filter.
+            // Singleton --> ok.
+            // Multi-element Array --> (e.g. [FlateDecode, DCTDecode]) not supported, skip.
             let filter: Option<&[u8]> = match stream.dict.get(b"Filter").ok() {
                 Some(Object::Name(n)) => Some(n.as_slice()),
                 Some(Object::Array(arr)) if arr.len() == 1 => {
@@ -86,35 +80,27 @@ pub fn compress_images(doc: &mut Document, quality: u8, verbose: bool) {
 
             match filter {
                 Some(b"DCTDecode") | Some(b"JPXDecode") => {
-                    if verbose {
-                        eprintln!("[img {:?}] → processing JPEG/JPX via image::load_from_memory", id);
-                    }
+                    verbose!(verbose, "[img {:?}] → processing JPEG/JPX via image::load_from_memory", id);
                     let img = match image::load_from_memory(&stream.content) {
                         Ok(data) => data,
                         Err(e) => {
-                            if verbose {
-                                eprintln!("[img {:?}] → skipped: load_from_memory failed: {}", id, e);
-                            }
+                            verbose!(verbose, "[img {:?}] → skipped: load_from_memory failed: {}", id, e);
                             continue;
                         }
                     };
                     let _ = JpegEncoder::new_with_quality(cursor, quality).encode_image(&img);
                 }
                 Some(other_filter) => {
-                    if verbose {
-                        eprintln!(
-                            "[img {:?}] → processing raw pixels (filter={}, colorspace={})",
-                            id,
-                            String::from_utf8_lossy(other_filter),
-                            color_str
-                        );
-                    }
+                    verbose!(verbose,
+                        "[img {:?}] → processing raw pixels (filter={}, colorspace={})",
+                        id,
+                        String::from_utf8_lossy(other_filter),
+                        color_str
+                    );
                     let raw = match stream.decompressed_content() {
                         Ok(data) => data,
                         Err(e) => {
-                            if verbose {
-                                eprintln!("[img {:?}] → skipped: decompressed_content failed: {}", id, e);
-                            }
+                            verbose!(verbose, "[img {:?}] → skipped: decompressed_content failed: {}", id, e);
                             continue;
                         }
                     };
@@ -128,42 +114,34 @@ pub fn compress_images(doc: &mut Document, quality: u8, verbose: bool) {
                     let img = match img {
                         Some(i) => i,
                         None => {
-                            if verbose {
-                                eprintln!(
-                                    "[img {:?}] → skipped: from_raw failed (mismatched dimensions or unsupported format, expected {}x{}x{} bytes)",
-                                    id, width, height,
-                                    if color_space_raw == Some(b"DeviceGray") { width * height } else { width * height * 3 }
-                                );
-                            }
+                            verbose!(verbose,
+                                "[img {:?}] → skipped: from_raw failed (mismatched dimensions or unsupported format, expected {}x{}x{} bytes)",
+                                id, width, height,
+                                if color_space_raw == Some(b"DeviceGray") { width * height } else { width * height * 3 }
+                            );
                             continue;
                         }
                     };
                     let _ = JpegEncoder::new_with_quality(cursor, quality).encode_image(&img);
                 }
                 None => {
-                    if verbose {
-                        eprintln!("[img {:?}] → skipped: no Filter entry (uncompressed stream)", id);
-                    }
+                    verbose!(verbose, "[img {:?}] → skipped: no Filter entry (uncompressed stream)", id);
                     continue;
                 }
             }
 
             if buf.is_empty() {
-                if verbose {
-                    eprintln!("[img {:?}] → skipped: JPEG encoding produced empty output", id);
-                }
+                verbose!(verbose, "[img {:?}] → skipped: JPEG encoding produced empty output", id);
                 continue;
             }
 
             if buf.len() < stream.content.len() {
-                if verbose {
-                    eprintln!("[img {:?}] → compressed {}B → {}B", id, stream.content.len(), buf.len());
-                }
+                verbose!(verbose, "[img {:?}] → compressed {}B → {}B", id, stream.content.len(), buf.len());
                 stream.content = buf;
                 stream.dict.set(b"Filter", Object::Name(b"DCTDecode".to_vec()));
                 stream.dict.set(b"Length", Object::Integer(stream.content.len() as i64));
-            } else if verbose {
-                eprintln!(
+            } else {
+                verbose!(verbose,
                     "[img {:?}] → skipped: re-encoded ({}B) not smaller than original ({}B)",
                     id, buf.len(), stream.content.len()
                 );
