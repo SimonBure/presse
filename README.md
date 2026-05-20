@@ -17,6 +17,20 @@ Compress or merge PDF files naturally and easily with this ready-to-use command 
 
 ## Installation
 
+### Shell installer (macOS/Linux)
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/SimonBure/presse/releases/latest/download/presse-installer.sh | sh
+```
+
+### PowerShell (Windows)
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/SimonBure/presse/releases/latest/download/presse-installer.ps1 | iex"
+```
+
+### MSI (Windows)
+Download the `.msi` from the [latest release](https://github.com/SimonBure/presse/releases/latest).
+
+### Cargo
 ```bash
 cargo install presse
 ```
