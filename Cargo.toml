@@ -2,11 +2,19 @@
 name = "presse"
 version = "0.2.0"
 edition = "2024"
+author = "Simon Buré"
 description = "Fast PDF compression CLI — JPEG recompression and structural optimization"
 license = "GPL-3.0"
 repository = "https://github.com/SimonBure/presse"
+homepage = "https://github.com/SimonBure/presse"
 keywords = ["pdf", "compression", "cli", "images", "optimization"]
 categories = ["command-line-utilities", "compression"]
+
+[package.metadata.wix]
+upgrade-guid = "908C4A9D-CBD9-4772-A0DE-B033A3CC9C74"
+path-guid = "20B73937-7905-4D33-B513-8D635C4BB57C"
+license = false
+eula = false
 
 [dependencies]
 # PDF manipulation
@@ -18,3 +26,8 @@ clap = { version = "4", features = ["derive"] }
 # Progress bar
 indicatif = "0.17"
 image = "0.25.9"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
