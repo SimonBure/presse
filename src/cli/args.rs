@@ -42,6 +42,32 @@ pub enum Commands {
         #[arg(short, long, default_value_t = false)]
         compress: bool,
     },
+
+    /// Convert one or several images to PDF
+    Convert {
+        /// Input image files
+        input: Vec<PathBuf>,
+
+        /// Output file or directory (optional)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Merge all images into a single PDF
+        #[arg(short, long, default_value_t = false)]
+        merge: bool,
+
+        /// JPEG-compress the embedded images
+        #[arg(short, long, default_value_t = false)]
+        compress: bool,
+
+        /// Target quality for --compress (1-100)
+        #[arg(short, long, default_value_t = 80)]
+        quality: u8,
+
+        /// Verbose output
+        #[arg(short, long, default_value_t = false)]
+        verbose: bool,
+    },
 }
 
 pub fn resolve_press_path_output(file_path: &Path, output: &Option<PathBuf>) -> PathBuf {
@@ -57,6 +83,17 @@ pub fn resolve_press_path_output(file_path: &Path, output: &Option<PathBuf>) -> 
             path.set_file_name(format!("{}_compressed.pdf", stem));
             path
         }
+    }
+}
+
+pub fn resolve_convert_path_output(file_path: &Path, output: &Option<PathBuf>) -> PathBuf {
+    match output {
+        Some(path) if path.is_dir() || path.to_str().unwrap().ends_with('/') => {
+            let stem = file_path.file_stem().unwrap().to_str().unwrap();
+            path.join(format!("{}.pdf", stem))
+        }
+        Some(path) => path.clone(),
+        None => file_path.with_extension("pdf"),
     }
 }
 

@@ -6,8 +6,9 @@ use pdf::reader::{load_pdf, get_pdf_size_in_kilobytes, get_compression_ratio_in_
 use pdf::writer::{compress_and_save_pdf, save_pdf};
 use pdf::images::compress_images;
 use pdf::merger::merge;
+use pdf::builder::image_to_pdf;
 
-use cli::args::{Cli, Commands, resolve_press_path_output, resolve_merge_path_output};
+use cli::args::{Cli, Commands, resolve_press_path_output, resolve_merge_path_output, resolve_convert_path_output};
 use clap::Parser;
 
 use indicatif::{ProgressBar, ProgressStyle};
@@ -88,6 +89,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let mut merged = merge(documents)?;
             save_pdf(&mut merged, output.to_str().unwrap())?;
+        }
+
+        Commands::Convert { input, output, merge: do_merge, compress, quality, verbose } => {
+            if do_merge {
+                let mut docs = Vec::new();
+                for path in &input {
+                    match image_to_pdf(path, verbose) {
+                        Ok(d) => docs.push(d),
+                        Err(e) => eprintln!("Skipping {}: {}", path.display(), e),
+                    }
+                }
+
+                let mut merged = merge(docs)?;
+                if compress { compress_images(&mut merged, quality, verbose); }
+
+                let out = resolve_merge_path_output(&output, compress);
+                if compress {
+                    compress_and_save_pdf(&mut merged, out.to_str().unwrap(), verbose)?;
+                } else {
+                    save_pdf(&mut merged, out.to_str().unwrap())?;
+                }
+            } else {
+                // Same multi-file/-o guard as Press: -o must be a dir when >1 input.
+                if input.len() > 1
+                    && let Some(ref path) = output
+                    && !path.is_dir() && !path.to_str().unwrap().ends_with('/') {
+                    eprintln!("Error: -o must be a directory when converting multiple images");
+                    std::process::exit(1);
+                }
+
+                for path in &input {
+                    let mut doc = match image_to_pdf(path, verbose) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            eprintln!("Skipping {}: {}", path.display(), e);
+                            continue;
+                        }
+                    };
+
+                    if compress { compress_images(&mut doc, quality, verbose); }
+
+                    let out = resolve_convert_path_output(path, &output);
+                    if compress {
+                        compress_and_save_pdf(&mut doc, out.to_str().unwrap(), verbose)?;
+                    } else {
+                        save_pdf(&mut doc, out.to_str().unwrap())?;
+                    }
+                }
+            }
         }
     }
 
