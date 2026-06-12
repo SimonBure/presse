@@ -7,7 +7,9 @@ use lopdf::content::{Content, Operation};
 /// FlateDecode DeviceRGB Image XObject (1px = 1pt page). If the source has an
 /// alpha channel, the alpha is preserved losslessly as a DeviceGray `/SMask`.
 pub fn image_to_pdf(path: &Path, verbose: bool) -> Result<Document, Box<dyn std::error::Error>> {
-    let dynimg = image::open(path)?;
+    let dynimg = image::ImageReader::open(path)?
+        .with_guessed_format()? // sniff magic bytes instead of trusting the extension
+        .decode()?;
     let (w, h) = (dynimg.width(), dynimg.height());
 
     let mut doc = Document::with_version("1.5");

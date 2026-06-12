@@ -2,7 +2,7 @@
 mod cli;
 mod pdf;
 
-use pdf::reader::{load_pdf, get_pdf_size_in_kilobytes, get_compression_ratio_in_percent};
+use pdf::reader::{load_pdf, load_input_as_pdf, get_pdf_size_in_kilobytes, get_compression_ratio_in_percent};
 use pdf::writer::{compress_and_save_pdf, save_pdf};
 use pdf::images::compress_images;
 use pdf::merger::merge;
@@ -76,7 +76,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Commands::Merge { input, output, compress } => {
-            let mut documents: Vec<_> = input.iter().map(|path| load_pdf(path.to_str().unwrap()).unwrap()).collect();
+            let mut documents = Vec::new();
+            for path in &input {
+                match load_input_as_pdf(path, false) {
+                    Ok(d) => documents.push(d),
+                    Err(e) => eprintln!("Skipping {}: {}", path.display(), e),
+                }
+            }
 
             // If compress => compress all inputs first then merge. If not, just merge.
             if compress {

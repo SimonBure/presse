@@ -3,9 +3,10 @@
 
 # presse
 
-A fast command-line tool for PDF compression and merging, written in Rust.
+A fast command-line tool for PDF manipulation written in Rust.
 
-Compress or merge PDF files naturally and easily with this ready-to-use command line tool. You don't want to send your sensitive documents online? Ghostscript is too obscure to use? Presse is the answer! Its usage is very intuitive. Images are decoded, compressed and then re-encoded without intermediate steps, making it fast and reliable.
+**Compress and merge** PDF files naturally and easily with this ready-to-use command line tool.
+**Convert images** of any format into ready-to-use pdfs.
 
 ## Features
 
@@ -14,6 +15,8 @@ Compress or merge PDF files naturally and easily with this ready-to-use command 
 - **Batch processing** — compress multiple files in one command via shell wildcards
 - **Smart output paths** — sensible defaults, explicit naming, or output to a directory
 - **PDF merging** — combine multiple documents into one, with optional compression
+- **Image conversion** — transform any image (.png, .jpg) into a .pdf
+- **Merge docs and images** in a single command, with smart format detection
 
 ## Installation
 

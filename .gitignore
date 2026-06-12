@@ -31,3 +31,5 @@ results/
 
 benchmark/
 benchmark/!*.pdf
+
+demo/img
