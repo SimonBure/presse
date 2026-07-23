@@ -33,3 +33,4 @@ benchmark/
 benchmark/!*.pdf
 
 demo/img
+logo_legacy.png

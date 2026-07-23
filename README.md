@@ -1,12 +1,21 @@
-[![Crates.io](https://img.shields.io/crates/v/presse.svg)](https://crates.io/crates/presse)
+# presse -- PDF manipulation command-line tool
+<p align="center">
+    <img src="./logo.webp" alt="Presse's logo" width=150 height=150/>
+</p>
+
 ![demo](demo/demo.gif)
 
-# presse
+<p align="center">
+    <img src="https://img.shields.io/crates/v/presse.svg?style=for-the-badge" alt="Crates.io">
+    <a href="https://github.com/stars/SimonBure/presse"><img src="https://img.shields.io/github/stars/SimonBure/presse?style=for-the-badge&label=Stars%20&logo=github&logoColor=white" alt="Presse stars" /></a>
+</p>
 
 A fast command-line tool for PDF manipulation written in Rust.
 
 **Compress and merge** PDF files naturally and easily with this ready-to-use command line tool.
 **Convert images** of any format into ready-to-use pdfs.
+
+**7x faster** than ghostscript with **better** compression. Benchmarked against ghostscript on 19 PDFs.
 
 ## Features
 
@@ -128,3 +137,6 @@ We are happy to welcome contributions! Pull requests are welcome.
 
 ## License
 [GPL-3.0](LICENSE)
+
+
+Made with ❤️ in Paris.
