@@ -7,7 +7,7 @@
 
 <p align="center">
     <img src="https://img.shields.io/crates/v/presse.svg?style=for-the-badge" alt="Crates.io">
-    <a href="https://github.com/stars/SimonBure/presse"><img src="https://img.shields.io/github/stars/SimonBure/presse?style=for-the-badge&label=Stars%20&logo=github&logoColor=white" alt="Presse stars" /></a>
+    <a href="https://github.com/SimonBure/presse"><img src="https://img.shields.io/github/stars/SimonBure/presse?style=for-the-badge&label=Stars%20&logo=github&logoColor=white" alt="Presse stars" /></a>
 </p>
 
 A fast command-line tool for PDF manipulation written in Rust.
