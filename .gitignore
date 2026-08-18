@@ -34,3 +34,11 @@ benchmark/!*.pdf
 
 demo/img
 logo_legacy.png
+
+# Fixtures are generated deterministically by ci/make_fixtures.py.
+# The generator is the corpus definition; committing the output too would
+# only create a way for the two to drift apart.
+tests/fixtures/
+
+__pycache__/
+*.pyc
