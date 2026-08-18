@@ -1,34 +1,47 @@
-#[macro_use] mod macros;
+#[macro_use]
+mod macros;
 mod cli;
 mod pdf;
 
-use pdf::reader::{load_pdf, load_input_as_pdf, get_pdf_size_in_kilobytes, get_compression_ratio_in_percent};
-use pdf::writer::{compress_and_save_pdf, save_pdf};
+use pdf::builder::image_to_pdf;
 use pdf::images::compress_images;
 use pdf::merger::merge;
-use pdf::builder::image_to_pdf;
+use pdf::reader::{
+    get_compression_ratio_in_percent, get_pdf_size_in_kilobytes, load_input_as_pdf, load_pdf,
+};
+use pdf::writer::{compress_and_save_pdf, save_pdf};
 
-use cli::args::{Cli, Commands, resolve_press_path_output, resolve_merge_path_output, resolve_convert_path_output};
 use clap::Parser;
+use cli::args::{
+    Cli, Commands, resolve_convert_path_output, resolve_merge_path_output,
+    resolve_press_path_output,
+};
 
 use indicatif::{ProgressBar, ProgressStyle};
-
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Press { input, output, quality, verbose } => {
+        Commands::Press {
+            input,
+            output,
+            quality,
+            verbose,
+        } => {
             let bar = ProgressBar::new(input.len() as u64);
-            bar.set_style(ProgressStyle::default_bar()
-                .template("{bar:40.cyan/blue} {pos}/{len} {eta}")
-                .unwrap()
+            bar.set_style(
+                ProgressStyle::default_bar()
+                    .template("{bar:40.cyan/blue} {pos}/{len} {eta}")
+                    .unwrap(),
             );
 
             // Fail if multiple files + output are given & output is not a dir
             if input.len() > 1
                 && let Some(ref path) = output
-                && !path.is_dir() && !path.to_str().unwrap().ends_with('/') {
+                && !path.is_dir()
+                && !path.to_str().unwrap().ends_with('/')
+            {
                 eprintln!("Error: -o must be a directory when compressing multiple documents");
                 std::process::exit(1);
             }
@@ -36,7 +49,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Create output dir if needed (once)
             if let Some(ref path) = output {
                 if let Some(parent) = path.parent()
-                    && !parent.as_os_str().is_empty() {
+                    && !parent.as_os_str().is_empty()
+                {
                     std::fs::create_dir_all(parent)?;
                 }
                 // If -o is a directory itself (ends with /)
@@ -44,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::fs::create_dir_all(path)?;
                 }
             }
-    
+
             for file_path in &input {
                 // Loading the document
                 let mut doc = match load_pdf(file_path.to_str().unwrap()) {
@@ -63,10 +77,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Compression summary
                 if verbose {
-                    let original_size = get_pdf_size_in_kilobytes(file_path.to_str().unwrap()).unwrap();
-                    let compressed_size = get_pdf_size_in_kilobytes(output.to_str().unwrap()).unwrap();
-                    let compression_ratio = get_compression_ratio_in_percent(original_size, compressed_size);
-                    bar.println(format!("{}kB → {}kB ({:.2}% compression)", original_size, compressed_size, compression_ratio));
+                    let original_size =
+                        get_pdf_size_in_kilobytes(file_path.to_str().unwrap()).unwrap();
+                    let compressed_size =
+                        get_pdf_size_in_kilobytes(output.to_str().unwrap()).unwrap();
+                    let compression_ratio =
+                        get_compression_ratio_in_percent(original_size, compressed_size);
+                    bar.println(format!(
+                        "{}kB → {}kB ({:.2}% compression)",
+                        original_size, compressed_size, compression_ratio
+                    ));
                 }
 
                 bar.inc(1);
@@ -75,7 +95,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             bar.finish_with_message("Done");
         }
 
-        Commands::Merge { input, output, compress } => {
+        Commands::Merge {
+            input,
+            output,
+            compress,
+        } => {
             let mut documents = Vec::new();
             for path in &input {
                 match load_input_as_pdf(path, false) {
@@ -97,7 +121,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             save_pdf(&mut merged, output.to_str().unwrap())?;
         }
 
-        Commands::Convert { input, output, merge: do_merge, compress, quality, verbose } => {
+        Commands::Convert {
+            input,
+            output,
+            merge: do_merge,
+            compress,
+            quality,
+            verbose,
+        } => {
             if do_merge {
                 let mut docs = Vec::new();
                 for path in &input {
@@ -108,7 +139,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 let mut merged = merge(docs)?;
-                if compress { compress_images(&mut merged, quality, verbose); }
+                if compress {
+                    compress_images(&mut merged, quality, verbose);
+                }
 
                 let out = resolve_merge_path_output(&output, compress);
                 if compress {
@@ -120,7 +153,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Same multi-file/-o guard as Press: -o must be a dir when >1 input.
                 if input.len() > 1
                     && let Some(ref path) = output
-                    && !path.is_dir() && !path.to_str().unwrap().ends_with('/') {
+                    && !path.is_dir()
+                    && !path.to_str().unwrap().ends_with('/')
+                {
                     eprintln!("Error: -o must be a directory when converting multiple images");
                     std::process::exit(1);
                 }
@@ -134,7 +169,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     };
 
-                    if compress { compress_images(&mut doc, quality, verbose); }
+                    if compress {
+                        compress_images(&mut doc, quality, verbose);
+                    }
 
                     let out = resolve_convert_path_output(path, &output);
                     if compress {
@@ -146,9 +183,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-
-
-    
 
     Ok(())
 }

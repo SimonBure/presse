@@ -23,6 +23,24 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Cheap and fast, so it runs as its own job rather than gating the
+  # validity work behind it — a formatting nit should never delay the
+  # answer to "does presse still emit sound PDFs?".
+  lint:
+    name: Format and clippy
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Formatting
+        run: cargo fmt --check
+
+      # The codebase is clippy-clean at default lint levels, so warnings are
+      # denied from the start rather than accumulating an allowlist later.
+      - name: Clippy
+        run: cargo clippy --release --all-targets --locked -- -D warnings
+
   validity:
     name: Build and validity gate
     runs-on: ubuntu-latest

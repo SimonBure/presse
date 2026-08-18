@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
-use lopdf::{Document, Object, ObjectId, Bookmark};
-
+use lopdf::{Bookmark, Document, Object, ObjectId};
 
 pub fn merge(documents: Vec<Document>) -> Result<Document, Box<dyn std::error::Error>> {
     let mut max_id = 1;
@@ -17,22 +16,16 @@ pub fn merge(documents: Vec<Document>) -> Result<Document, Box<dyn std::error::E
         doc.renumber_objects_with(max_id);
         max_id = doc.max_id + 1;
 
-        documents_pages.extend(
-            doc.get_pages().into_values().map(|object_id| {
-                if !first {
-                    let bookmark = Bookmark::new(
-                        format!("Page_{}", pagenum),
-                        [0.0, 0.0, 1.0],
-                        0,
-                        object_id,
-                    );
-                    document.add_bookmark(bookmark, None);
-                    first = true;
-                    pagenum += 1;
-                }
-                (object_id, doc.get_object(object_id).unwrap().to_owned())
-            })
-        );
+        documents_pages.extend(doc.get_pages().into_values().map(|object_id| {
+            if !first {
+                let bookmark =
+                    Bookmark::new(format!("Page_{}", pagenum), [0.0, 0.0, 1.0], 0, object_id);
+                document.add_bookmark(bookmark, None);
+                first = true;
+                pagenum += 1;
+            }
+            (object_id, doc.get_object(object_id).unwrap().to_owned())
+        }));
         documents_objects.extend(doc.objects);
     }
 
@@ -43,7 +36,11 @@ pub fn merge(documents: Vec<Document>) -> Result<Document, Box<dyn std::error::E
         match object.type_name().unwrap_or(b"") {
             b"Catalog" => {
                 catalog_object = Some((
-                    if let Some((id, _)) = catalog_object { id } else { *object_id },
+                    if let Some((id, _)) = catalog_object {
+                        id
+                    } else {
+                        *object_id
+                    },
                     object.clone(),
                 ));
             }
@@ -51,11 +48,16 @@ pub fn merge(documents: Vec<Document>) -> Result<Document, Box<dyn std::error::E
                 if let Ok(dictionary) = object.as_dict() {
                     let mut dictionary = dictionary.clone();
                     if let Some((_, ref object)) = pages_object
-                        && let Ok(old_dictionary) = object.as_dict() {
+                        && let Ok(old_dictionary) = object.as_dict()
+                    {
                         dictionary.extend(old_dictionary);
                     }
                     pages_object = Some((
-                        if let Some((id, _)) = pages_object { id } else { *object_id },
+                        if let Some((id, _)) = pages_object {
+                            id
+                        } else {
+                            *object_id
+                        },
                         Object::Dictionary(dictionary),
                     ));
                 }
@@ -69,16 +71,16 @@ pub fn merge(documents: Vec<Document>) -> Result<Document, Box<dyn std::error::E
         }
     }
 
-    let pages_object = pages_object
-        .ok_or("Pages root not found in input documents")?;
-    let catalog_object = catalog_object
-        .ok_or("Catalog root not found in input documents")?;
+    let pages_object = pages_object.ok_or("Pages root not found in input documents")?;
+    let catalog_object = catalog_object.ok_or("Catalog root not found in input documents")?;
 
     for (object_id, object) in documents_pages.iter() {
         if let Ok(dictionary) = object.as_dict() {
             let mut dictionary = dictionary.clone();
             dictionary.set("Parent", pages_object.0);
-            document.objects.insert(*object_id, Object::Dictionary(dictionary));
+            document
+                .objects
+                .insert(*object_id, Object::Dictionary(dictionary));
         }
     }
 
@@ -92,14 +94,18 @@ pub fn merge(documents: Vec<Document>) -> Result<Document, Box<dyn std::error::E
                 .map(|(object_id, _)| Object::Reference(object_id))
                 .collect::<Vec<_>>(),
         );
-        document.objects.insert(pages_object.0, Object::Dictionary(dictionary));
+        document
+            .objects
+            .insert(pages_object.0, Object::Dictionary(dictionary));
     }
 
     if let Ok(dictionary) = catalog_object.1.as_dict() {
         let mut dictionary = dictionary.clone();
         dictionary.set("Pages", pages_object.0);
         dictionary.remove(b"Outlines");
-        document.objects.insert(catalog_object.0, Object::Dictionary(dictionary));
+        document
+            .objects
+            .insert(catalog_object.0, Object::Dictionary(dictionary));
     }
 
     document.trailer.set("Root", catalog_object.0);
@@ -110,7 +116,8 @@ pub fn merge(documents: Vec<Document>) -> Result<Document, Box<dyn std::error::E
     // Look up the catalog through the trailer AFTER renumbering — catalog_object.0 is stale
     if let Some(n) = document.build_outline()
         && let Ok(catalog_id) = document.trailer.get(b"Root").and_then(|r| r.as_reference())
-        && let Ok(Object::Dictionary(dict)) = document.get_object_mut(catalog_id) {
+        && let Ok(Object::Dictionary(dict)) = document.get_object_mut(catalog_id)
+    {
         dict.set("Outlines", Object::Reference(n));
     }
 

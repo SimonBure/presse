@@ -1,7 +1,11 @@
 use lopdf::{Document, SaveOptions};
 use std::fs::File;
 
-pub fn compress_and_save_pdf(doc: &mut Document, name: &str, verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub fn compress_and_save_pdf(
+    doc: &mut Document,
+    name: &str,
+    verbose: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let option: SaveOptions = SaveOptions::builder()
         .use_object_streams(true)
         .use_xref_streams(true)
@@ -9,9 +13,17 @@ pub fn compress_and_save_pdf(doc: &mut Document, name: &str, verbose: bool) -> R
         .compression_level(9)
         .build();
 
-    verbose!(verbose, "[writer] {} objects before cleanup", doc.objects.len());
+    verbose!(
+        verbose,
+        "[writer] {} objects before cleanup",
+        doc.objects.len()
+    );
     Document::delete_zero_length_streams(doc);
-    verbose!(verbose, "[writer] {} objects after cleanup", doc.objects.len());
+    verbose!(
+        verbose,
+        "[writer] {} objects after cleanup",
+        doc.objects.len()
+    );
 
     doc.compress();
 
