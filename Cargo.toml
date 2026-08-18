@@ -18,7 +18,7 @@ eula = false
 
 [dependencies]
 # PDF manipulation
-lopdf = "0.39.0"
+lopdf = "0.44"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
