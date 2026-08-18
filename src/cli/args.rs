@@ -98,7 +98,11 @@ pub fn resolve_convert_path_output(file_path: &Path, output: &Option<PathBuf>) -
 }
 
 pub fn resolve_merge_path_output(output: &Option<PathBuf>, compress: bool) -> PathBuf {
-    let default_name = if compress { "compressed_merged.pdf" } else { "merged.pdf" };
+    let default_name = if compress {
+        "compressed_merged.pdf"
+    } else {
+        "merged.pdf"
+    };
     match output {
         Some(path) if path.is_dir() || path.to_str().unwrap().ends_with('/') => {
             path.join(default_name)

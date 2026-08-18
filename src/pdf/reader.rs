@@ -1,8 +1,7 @@
+use lopdf::Document;
 use std::fs::{File, metadata};
 use std::io::Read;
 use std::path::Path;
-use lopdf::Document;
-
 
 pub fn load_pdf(doc_path: &str) -> Result<Document, Box<dyn std::error::Error>> {
     Ok(Document::load(doc_path)?)
@@ -10,7 +9,10 @@ pub fn load_pdf(doc_path: &str) -> Result<Document, Box<dyn std::error::Error>> 
 
 /// Load any input into a PDF Document: real PDFs via lopdf, images via image_to_pdf.
 /// Detection is content-based (PDF magic), not extension-based.
-pub fn load_input_as_pdf(path: &Path, verbose: bool) -> Result<Document, Box<dyn std::error::Error>> {
+pub fn load_input_as_pdf(
+    path: &Path,
+    verbose: bool,
+) -> Result<Document, Box<dyn std::error::Error>> {
     if is_pdf(path)? {
         load_pdf(path.to_str().ok_or("non-UTF8 path")?)
     } else {

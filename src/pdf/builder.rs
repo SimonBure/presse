@@ -1,6 +1,6 @@
-use std::path::Path;
-use lopdf::{Document, Object, Stream, dictionary};
 use lopdf::content::{Content, Operation};
+use lopdf::{Document, Object, Stream, dictionary};
+use std::path::Path;
 
 /// Build a single-page PDF whose only content is `path`'s image, full-bleed.
 /// Decodes via the `image` crate (any supported format) and embeds it as a
@@ -40,14 +40,17 @@ pub fn image_to_pdf(path: &Path, verbose: bool) -> Result<Document, Box<dyn std:
 
     // Alpha → DeviceGray soft mask, referenced from the colour image's /SMask.
     if let Some(a) = alpha {
-        let mut smask = Stream::new(dictionary! {
-            "Type" => "XObject",
-            "Subtype" => "Image",
-            "Width" => w as i64,
-            "Height" => h as i64,
-            "ColorSpace" => "DeviceGray",
-            "BitsPerComponent" => 8,
-        }, a);
+        let mut smask = Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => w as i64,
+                "Height" => h as i64,
+                "ColorSpace" => "DeviceGray",
+                "BitsPerComponent" => 8,
+            },
+            a,
+        );
         smask.compress()?;
         let smask_id = doc.add_object(smask);
         image_dict.set("SMask", smask_id);
@@ -57,12 +60,17 @@ pub fn image_to_pdf(path: &Path, verbose: bool) -> Result<Document, Box<dyn std:
     image_stream.compress()?; // -> Filter FlateDecode (so compress_images sees it)
     let image_id = doc.add_object(image_stream);
 
-    let content = Content { operations: vec![
-        Operation::new("q", vec![]),
-        Operation::new("cm", vec![w.into(), 0.into(), 0.into(), h.into(), 0.into(), 0.into()]),
-        Operation::new("Do", vec![Object::Name(b"Im0".to_vec())]),
-        Operation::new("Q", vec![]),
-    ]};
+    let content = Content {
+        operations: vec![
+            Operation::new("q", vec![]),
+            Operation::new(
+                "cm",
+                vec![w.into(), 0.into(), 0.into(), h.into(), 0.into(), 0.into()],
+            ),
+            Operation::new("Do", vec![Object::Name(b"Im0".to_vec())]),
+            Operation::new("Q", vec![]),
+        ],
+    };
     let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode()?));
 
     // MediaBox + Resources live ON THE PAGE (not inherited from Pages) so merge() preserves them.
@@ -74,11 +82,14 @@ pub fn image_to_pdf(path: &Path, verbose: bool) -> Result<Document, Box<dyn std:
         "Resources" => dictionary! { "XObject" => dictionary! { "Im0" => image_id } },
     });
 
-    doc.objects.insert(pages_id, Object::Dictionary(dictionary! {
-        "Type" => "Pages",
-        "Kids" => vec![page_id.into()],
-        "Count" => 1,
-    }));
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![page_id.into()],
+            "Count" => 1,
+        }),
+    );
     let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
     doc.trailer.set("Root", catalog_id);
 
