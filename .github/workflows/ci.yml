@@ -1,0 +1,64 @@
+# Correctness CI for presse.
+#
+# The job that matters here is the validity gate: presse transforms files, so
+# the unit under test is the output document, not the return value. A run that
+# exits 0 while emitting a PDF with a truncated cross-reference table is a
+# failure, and `ci/validate_corpus.py` is what says so.
+#
+# Only actions/checkout is used. The Ubuntu runner ships a Rust toolchain and
+# Python 3, and the gate depends on nothing outside the standard library, so
+# there is no third-party action in the path to a green tick.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validity:
+    name: Build and validity gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # qpdf is the strictest external validator and the one that catches
+      # malformed cross-reference data. PRESSE_REQUIRE_PDF_TOOLS below turns
+      # a missing tool into a hard error, so a broken image cannot quietly
+      # downgrade this job into a weaker one.
+      - name: Install PDF validators
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qpdf poppler-utils ghostscript
+
+      - name: Toolchain
+        run: |
+          rustc --version
+          cargo --version
+          qpdf --version | head -1
+          python3 --version
+
+      # --locked fails if Cargo.lock is stale rather than silently resolving
+      # different versions than the ones that were reviewed.
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Tests
+        run: cargo test --release --locked
+
+      - name: Generate fixtures
+        run: python3 ci/make_fixtures.py tests/fixtures
+
+      - name: Validity gate
+        env:
+          PRESSE_REQUIRE_PDF_TOOLS: "1"
+        run: python3 ci/validate_corpus.py target/release/presse tests/fixtures
