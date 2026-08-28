@@ -1,10 +1,19 @@
 use lopdf::Document;
+use memmap2::Mmap;
 use std::fs::{File, metadata};
 use std::io::Read;
 use std::path::Path;
 
+/// Load a PDF by memory-mapping the file instead of copying it into a heap
+/// buffer. The mapping lives only for the duration of the parse; `lopdf`
+/// copies everything it needs into its own structures, so the map can be
+/// dropped right after.
 pub fn load_pdf(doc_path: &str) -> Result<Document, Box<dyn std::error::Error>> {
-    Ok(Document::load(doc_path)?)
+    let file = File::open(doc_path)?;
+    // SAFETY: the mapping is read-only and never touched while the file could
+    // be mutated by us (input files are not written to).
+    let mmap = unsafe { Mmap::map(&file)? };
+    Ok(Document::load_mem(&mmap)?)
 }
 
 /// Load any input into a PDF Document: real PDFs via lopdf, images via image_to_pdf.

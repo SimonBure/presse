@@ -1,0 +1,5 @@
+# Keep the Docker benchmark build context small.
+target
+.git
+wix
+demo

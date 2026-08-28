@@ -16,6 +16,9 @@ path-guid = "20B73937-7905-4D33-B513-8D635C4BB57C"
 license = false
 eula = false
 
+[features]
+default = []
+
 [dependencies]
 # PDF manipulation
 lopdf = "0.44"
@@ -26,6 +29,28 @@ clap = { version = "4", features = ["derive"] }
 # Progress bar
 indicatif = "0.17"
 image = "0.25.9"
+
+# Parallel image re-encoding
+rayon = "1.12"
+
+# zlib-rs deflate backend (pure Rust, faster than miniz_oxide). flate2 is a
+# transitive dep of lopdf/png; enabling `zlib-rs` here makes flate2 prefer it
+# over miniz_oxide across the whole graph (see flate2 ffi/mod.rs priority).
+flate2 = { version = "1.1", features = ["zlib-rs"] }
+
+# Zero-copy input reads
+memmap2 = "0.9"
+
+# Faster allocation for the many small buffers rayon workers create.
+mimalloc = "0.1"
+jpeg-encoder = { version = "0.7.1", features = ["simd"] }
+
+[dev-dependencies]
+# Same major/minor as the main deps, shared by tests/ and examples/ (corpus generator)
+lopdf = "0.44"
+image = "0.25"
+# Test-side inflate of flate-wrapped JPEG streams (lopdf cannot decode DCTDecode).
+flate2 = "1.1"
 
 # The profile that 'dist' will build with
 [profile.dist]

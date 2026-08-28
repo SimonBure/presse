@@ -1,0 +1,24 @@
+[package]
+name = "presse-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lopdf = "0.44"
+presse = { path = ".." }
+
+# Keep debug info so the fuzzer can symbolize panics.
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "fuzz_press"
+path = "fuzz_targets/fuzz_press.rs"
+test = false
+doc = false
+bench = false
