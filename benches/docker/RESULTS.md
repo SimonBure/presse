@@ -166,8 +166,9 @@ RTX 4080 SUPER, 16-core CPU, `-C target-cpu=native`, `-q 50`:
   stage is a wash vs the nvJPEG batch (photos20: 0.255–0.28 s with NVDEC vs
   0.243–0.25 s without). The stage is optional and self-degrading
   (`PRESSE_NO_NVDEC=1` forces the nvJPEG decode); it is verified
-  pixel-equivalent (≤1 IDCT-rounding delta on <0.01% of pixels) by
-  `examples/nvdec_verify.rs`.
+  pixel-equivalent against nvJPEG, with only ≤1-LSB IDCT-rounding
+  differences in the current hardware witness (mean |Δ| 0.0014; 0.14% of
+  pixels differ), by `examples/nvdec_verify.rs`.
 - GPU output is visually identical (SSIM 1.0000 on all 20 photo pages,
   qpdf clean) and 16–25 % smaller than the CPU encoder at the same quality
   (nvJPEG optimized Huffman).

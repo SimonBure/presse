@@ -55,7 +55,8 @@ All notable changes to this project will be documented in this file.
   kernel the driver JIT-compiles. Progressive / 4:2:2 / 4:4:4 JPEGs keep
   the nvJPEG decode. Optional: any init failure degrades to nvJPEG, and
   `PRESSE_NO_NVDEC=1` forces that path. Verified pixel-equivalent vs
-  nvJPEG (≤1 IDCT rounding delta on <0.01% of pixels) by
+  nvJPEG, with only ≤1-LSB IDCT-rounding differences in the current
+  hardware witness (mean |Δ| 0.0014; 0.14% of pixels differ), by
   `examples/nvdec_verify.rs`.
 - **Pluggable GPU transcoders** — `--acceleration cuda|rocm` behind a
   unified `ImageTranscoder` trait with graceful per-stream CPU fallback
