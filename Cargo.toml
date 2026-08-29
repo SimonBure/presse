@@ -25,6 +25,12 @@ default = []
 cuda = ["dep:baracuda-nvjpeg-sys", "dep:baracuda-cuda-sys", "dep:libloading"]
 # AMD rocJPEG backend (--acceleration rocm). Loads librocjpeg at runtime.
 rocm = ["dep:libloading"]
+# Extra pure-Rust compressors and optimizers behind default-off CLI flags:
+# --jbig2, --jpeg2000, --font-subset, --zopfli, --mrc, --dedup, and the
+# --compression presets. Kept out of default builds because the codec crates
+# (jbig2enc-rust, j2k) are heavy to compile; the flags fail with an explicit
+# "requires a build with the optimize feature" error when absent.
+optimize = ["dep:zopfli", "dep:subsetter", "dep:jbig2enc-rust", "dep:j2k"]
 
 [dependencies]
 # PDF manipulation
@@ -48,14 +54,21 @@ flate2 = { version = "1.1", features = ["zlib-rs"] }
 # Zero-copy input reads
 memmap2 = "0.9"
 
+# Faster allocation for the many small buffers rayon workers create.
+mimalloc = "0.1"
+jpeg-encoder = { version = "0.7.1", features = ["simd"] }
+
 # GPU backends (optional, see [features])
 baracuda-nvjpeg-sys = { version = "0.0.1-alpha.79", optional = true }
 baracuda-cuda-sys = { version = "0.0.1-alpha.79", optional = true }
 libloading = { version = "0.8", optional = true }
-
-# Faster allocation for the many small buffers rayon workers create.
-mimalloc = "0.1"
-jpeg-encoder = { version = "0.7.1", features = ["simd"] }
+# Pure-Rust optimizers behind the `optimize` feature (default off): Zopfli
+# deflate, OpenType font subsetting (typst's subsetter, PDF-tailored), a Rust
+# JBIG2 encoder with PDF fragment output, and the j2k JPEG2000/HTJ2K codec.
+zopfli = { version = "0.8.3", optional = true }
+subsetter = { version = "0.2.6", optional = true }
+jbig2enc-rust = { version = "0.5.3", optional = true }
+j2k = { version = "0.9.0", optional = true }
 
 [dev-dependencies]
 # Same major/minor as the main deps, shared by tests/ and examples/ (corpus generator)

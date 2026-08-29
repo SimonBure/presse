@@ -1,7 +1,27 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 
 use crate::transcode::Acceleration;
+
+/// Compression effort preset (`--compression`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum CompressionMode {
+    /// JPEG-only pipeline (the default): nothing beyond the standard passes.
+    #[default]
+    Fast,
+    /// Plus `--dedup` (structural stream coalescing; no new codecs).
+    Balanced,
+    /// Plus `--dedup`, `--zopfli`, `--recompress-flate`.
+    Small,
+    /// Everything: the codec candidates (JBIG2/JPEG2000/MRC), font
+    /// subsetting, dedup, Zopfli and Flate recompression.
+    Smallest,
+}
+
+impl CompressionMode {
+    // (Presets expand to the individual flags in `main`; the type itself
+    // carries no behavior.)
+}
 
 /// Fast PDF compression tool - easier and faster than ghostscript
 #[derive(Parser)]
@@ -154,6 +174,110 @@ indexed / mask) is kept per image.
 Default (flag omitted): JPEG-only pipeline, current behavior."
         )]
         raster_classify: bool,
+
+        /// Coalesce byte-identical non-image streams (fonts, ICC, XForms).
+        #[arg(
+            long,
+            default_value_t = false,
+            long_help = "Extend the duplicate-image coalescing to every stream in the
+  document: FontFile streams, ICC profiles, XForms, patterns/shadings and
+  arbitrary identical streams with byte-identical payloads and dictionaries
+  collapse onto one canonical object with every reference rewritten.
+  Rendering cannot change (identical stream + identical dictionary renders
+  identically). Safe, deterministic, idempotent; requires a build with the
+  `optimize` feature."
+        )]
+        dedup: bool,
+
+        /// Recompress Flate streams with the Zopfli algorithm.
+        #[arg(
+            long,
+            default_value_t = false,
+            long_help = "Like --recompress-flate, but the re-encode uses Zopfli — a
+  deliberately CPU-hungry deflate search that routinely finds smaller zlib
+  streams for the same decoded bytes (a few percent on text/content
+  streams). Each stream is kept only when strictly smaller, so it is a
+  pure size win at CPU cost; combine with `--compression smallest`.
+  Requires a build with the `optimize` feature."
+        )]
+        zopfli: bool,
+
+        /// Subset embedded TrueType fonts to the glyphs actually used.
+        #[arg(
+            long,
+            default_value_t = false,
+            long_help = "Subset every embedded TrueType font to the glyphs the content
+  streams actually use (typst's `subsetter`): text-showing operators are
+  scanned per font, used glyphs are kept, and the font is rewritten as a
+  CID font with an identity GID-to-CID map so the content strings are
+  remapped in place. A font is skipped whenever the used-glyph mapping
+  cannot be resolved exactly (unusual encodings, Type1/CID fonts) or the
+  program is CFF (FontFile3 — CFF subsetting is not implemented; only
+  TrueType FontFile2 programs are subset), and the
+  subset is kept only when strictly smaller. Text extraction stays valid
+  via a rebuilt ToUnicode map. Requires a build with the `optimize`
+  feature."
+        )]
+        font_subset: bool,
+
+        /// Also try a lossless JBIG2 encoding of bitonal masks.
+        #[arg(
+            long,
+            default_value_t = false,
+            long_help = "Add a JBIG2 candidate for bitonal content next to the CCITT G4 one
+  (rust jbig2enc-rust, lossless symbol/generic-region coding); the size
+  court keeps the smaller of G4 / JBIG2 / original per image. Requires a
+  build with the `optimize` feature."
+        )]
+        jbig2: bool,
+
+        /// Also try a JPEG2000 re-encoding of continuous-tone images.
+        #[arg(
+            long,
+            default_value_t = false,
+            long_help = "Add a JPEG2000 (JPXDecode) candidate for continuous-tone images
+  (pure-Rust j2k codec, rate-targeted lossy encode at 85% of the JPEG
+  candidate's bit budget). The rate target is only a sizing hint: every
+  candidate is decoded back and measured against the source pixels on the
+  native 512-px window, and admitted to the size court only above a 0.98
+  native-SSIM gate (candidate evidence: luma/chroma/edge error + SSIM).
+  Requires a build with the `optimize` feature."
+        )]
+        jpeg2000: bool,
+
+        /// Mixed-raster-content composite for classified bitonal scans.
+        #[arg(
+            long,
+            default_value_t = false,
+            long_help = "For classified bitonal scans, build a flat two-tone MRC composite
+  (solid paper-color background + solid ink-color foreground + a
+  high-resolution lossless CCITT G4 mask as its /SMask) instead of a flat
+  1-bit image: the background is the median paper color emitted as a 1×1
+  image, the foreground is composited through the mask — the
+  representation commercial scan compressors (ABBYY/LEADTOOLS/Pdftools)
+  use, minus their textured-background layer (future work). The page
+  content is rewritten to draw background then foreground, and the
+  candidate is kept only when strictly smaller than the source and the
+  JPEG candidate. (The mask is always G4: poppler's JBIG2 decoder
+  inverts its samples, which would make the SMask polarity
+  viewer-dependent.) Requires a build with the `optimize` feature."
+        )]
+        mrc: bool,
+
+        /// Compression effort preset.
+        #[arg(
+            long,
+            value_enum,
+            default_value_t = CompressionMode::Fast,
+            long_help = "Preset that enables the default-off optimization flags together:
+  fast (default) — the JPEG-only pipeline;
+  balanced — plus --dedup (no new codecs);
+  small — plus --zopfli and --recompress-flate;
+  smallest — plus --jbig2, --jpeg2000, --font-subset, --mrc and every
+  structural pass. Individual flags still work on their own. Modes other
+  than `fast` require a build with the `optimize` feature."
+        )]
+        compression: CompressionMode,
 
         // Details during the compression process --> sizes comparison before & after
         #[arg(short, long, default_value_t = false)]

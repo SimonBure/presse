@@ -22,7 +22,7 @@ use transcode::resolve;
 
 use clap::Parser;
 use cli::args::{
-    Cli, Commands, resolve_convert_path_output, resolve_merge_path_output,
+    Cli, Commands, CompressionMode, resolve_convert_path_output, resolve_merge_path_output,
     resolve_press_path_output,
 };
 
@@ -43,8 +43,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             jpeg_encoder,
             recompress_flate,
             raster_classify,
+            dedup,
+            zopfli,
+            font_subset,
+            jbig2,
+            jpeg2000,
+            mrc,
+            compression,
             verbose,
         } => {
+            // `--compression` presets expand to the individual flags; the
+            // user's own flags always win (a preset never *un*-sets one).
+            let (dedup, zopfli, font_subset, jbig2, jpeg2000, mrc, recompress_flate) =
+                match compression {
+                    CompressionMode::Fast => (
+                        dedup,
+                        zopfli,
+                        font_subset,
+                        jbig2,
+                        jpeg2000,
+                        mrc,
+                        recompress_flate,
+                    ),
+                    CompressionMode::Balanced => (
+                        true,
+                        zopfli,
+                        font_subset,
+                        jbig2,
+                        jpeg2000,
+                        mrc,
+                        recompress_flate,
+                    ),
+                    CompressionMode::Small => (true, true, font_subset, jbig2, jpeg2000, mrc, true),
+                    CompressionMode::Smallest => (true, true, true, true, true, true, true),
+                };
+            // The `optimize`-feature passes are default-off CLI flags; when
+            // the binary was built without the feature, asking for them is
+            // an explicit, actionable error instead of a silent no-op.
+            #[cfg(not(feature = "optimize"))]
+            if dedup || zopfli || font_subset || jbig2 || jpeg2000 || mrc {
+                eprintln!(
+                    "Error: --dedup/--zopfli/--font-subset/--jbig2/--jpeg2000/--mrc (and \
+                     --compression {compression:?}) require a build with the `optimize` feature:\n\
+                       cargo build --release --features optimize"
+                );
+                std::process::exit(1);
+            }
             // Resolve the transcoding backend up front: requesting a backend
             // that was not compiled in is an explicit error; a compiled-in
             // backend whose driver is missing warns and falls back to CPU.
@@ -99,8 +143,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         dpi,
                         palette,
                         classify: raster_classify,
+                        jbig2,
+                        jpeg2000,
+                        mrc,
                     },
                 );
+
+                // `--dedup` (optimize feature): extend the duplicate-image
+                // coalescing to every byte-identical non-image stream.
+                if dedup {
+                    let n = pdf::optimize::dedup_streams(&mut doc);
+                    verbose!(verbose, "[dedup] coalesced {n} duplicate stream object(s)");
+                }
 
                 // `--recompress-flate` (qpdf-style): re-encode existing
                 // Flate streams at the writer's level before saving.
@@ -110,6 +164,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         verbose,
                         "[writer] recompressed {n} existing FlateDecode stream(s)"
                     );
+                }
+
+                // `--zopfli` (optimize feature): the same recompression with
+                // the deliberately slower Zopfli search (strictly-smaller
+                // gate, pure size win at CPU cost).
+                if zopfli {
+                    let n = pdf::optimize::recompress_flate_zopfli(&mut doc);
+                    verbose!(verbose, "[zopfli] recompressed {n} FlateDecode stream(s)");
+                }
+
+                // `--font-subset` (optimize feature): subset embedded
+                // TrueType/CFF fonts to the glyphs the content actually
+                // uses; every font is skipped unless the used-glyph mapping
+                // resolves exactly and the subset is strictly smaller.
+                if font_subset {
+                    let n = pdf::optimize::subset_fonts(&mut doc);
+                    verbose!(verbose, "[fonts] subset {n} font(s)");
                 }
 
                 // Compressing the document
