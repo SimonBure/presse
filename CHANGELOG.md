@@ -47,6 +47,19 @@ All notable changes to this project will be documented in this file.
 - **Flate-wrapped JPEG** — retained or re-encoded DCT streams that shrink
   under zlib are stored as `[FlateDecode, DCTDecode]` when the full flate
   result is smaller (OCRmyPDF-style trick).
+- **NVDEC hardware decode stage** (`--acceleration cuda`) — baseline 4:2:0
+  JPEGs decode on the NVDEC hardware engine through the Video Codec SDK
+  (`libnvcuvid.so.1`, a driver component; parser-free decode mirroring
+  ffmpeg's `nvdec_mjpeg.c`) instead of nvJPEG's entropy-decode kernels;
+  the NV12 output is de-interleaved to planar YUV by a tiny embedded-PTX
+  kernel the driver JIT-compiles. Progressive / 4:2:2 / 4:4:4 JPEGs keep
+  the nvJPEG decode. Optional: any init failure degrades to nvJPEG, and
+  `PRESSE_NO_NVDEC=1` forces that path. Verified pixel-equivalent vs
+  nvJPEG (≤1 IDCT rounding delta on <0.01% of pixels) by
+  `examples/nvdec_verify.rs`.
+- **Pluggable GPU transcoders** — `--acceleration cuda|rocm` behind a
+  unified `ImageTranscoder` trait with graceful per-stream CPU fallback
+  (opt-in Cargo features; not linked into default builds).
 - **Linear-time object renumbering** — lopdf's O(n²) `renumber_objects`
   replaced with a hash-map pass (67k-object doc: 530 → 62 ms); bounded
   dedup-cache hash (length + first/last 4 KiB).
@@ -67,9 +80,9 @@ All notable changes to this project will be documented in this file.
 - **Regression suite** — tests covering structural integrity (qpdf /
   ghostscript / `/Length` gates), visual SSIM, dpi-capping invariants,
   cross-reference reachability, grayscale component preservation,
-  serial/parallel determinism, gapped numbering, and the stock flag
-  surface (`--jpeg-encoder`, `--ssim`, `--dpi`, `--raster-classify`,
-  `--recompress-flate`).
+  serial/parallel determinism, gapped numbering, the stock flag surface
+  (`--jpeg-encoder`, `--ssim`, `--dpi`, `--raster-classify`,
+  `--recompress-flate`), and GPU fallback.
 - **Benchmark + quality harness** — containerized 100-PDF benchmark,
   quality-vs-speed analysis (including MuPDF and the non-compressing Rust
   tools), a dpi sweep, and a multi-tool Pareto-frontier harness.

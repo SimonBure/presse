@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
+use crate::transcode::Acceleration;
+
 /// Fast PDF compression tool - easier and faster than ghostscript
 #[derive(Parser)]
 #[command(name = "presse")]
@@ -24,6 +26,11 @@ pub enum Commands {
         /// Target quality for lossy image compression
         #[arg(short, long, default_value_t = 80)]
         quality: u8,
+
+        /// Image transcoding backend: cpu (default), auto, cuda, or rocm.
+        /// The gpu backends require a build with --features cuda / rocm.
+        #[arg(short, long, value_enum, default_value_t = Acceleration::Cpu)]
+        acceleration: Acceleration,
 
         /// Cap the effective resolution of placed images to DPI pixels per
         /// inch. Omitted: images keep their source resolution.
