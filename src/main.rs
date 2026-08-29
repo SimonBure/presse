@@ -2,14 +2,23 @@
 mod macros;
 mod cli;
 mod pdf;
+mod transcode;
+
+// Rayon workers constantly allocate and drop temporary buffers during image
+// transcoding; mimalloc has per-thread caches that avoid contention on the
+// system allocator. It builds against musl given a musl C toolchain
+// (musl-gcc), so the release artifact gets it on every target.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use pdf::builder::image_to_pdf;
-use pdf::images::compress_images;
+use pdf::images::{CompressOptions, QualityMode, compress_images, compress_images_opt};
 use pdf::merger::merge;
 use pdf::reader::{
     get_compression_ratio_in_percent, get_pdf_size_in_kilobytes, load_input_as_pdf, load_pdf,
 };
-use pdf::writer::{compress_and_save_pdf, save_pdf};
+use pdf::writer::{compress_and_save_pdf, recompress_flate as recompress_flate_streams, save_pdf};
+use transcode::CpuTranscoder;
 
 use clap::Parser;
 use cli::args::{
@@ -27,8 +36,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             input,
             output,
             quality,
+            dpi,
+            ssim,
+            palette,
+            jpeg_encoder,
+            recompress_flate,
+            raster_classify,
             verbose,
         } => {
+            // `--jpeg-encoder` selects the 4:2:0 CPU codec.
+            let transcoder = CpuTranscoder::new(jpeg_encoder);
             let bar = ProgressBar::new(input.len() as u64);
             bar.set_style(
                 ProgressStyle::default_bar()
@@ -69,7 +86,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                compress_images(&mut doc, quality, verbose);
+                compress_images_opt(
+                    &mut doc,
+                    QualityMode::press(quality, ssim),
+                    verbose,
+                    &transcoder,
+                    CompressOptions {
+                        dpi,
+                        palette,
+                        classify: raster_classify,
+                    },
+                );
+
+                // `--recompress-flate` (qpdf-style): re-encode existing
+                // Flate streams at the writer's level before saving.
+                if recompress_flate {
+                    let n = recompress_flate_streams(&mut doc);
+                    verbose!(
+                        verbose,
+                        "[writer] recompressed {n} existing FlateDecode stream(s)"
+                    );
+                }
 
                 // Compressing the document
                 let output = resolve_press_path_output(file_path, &output);

@@ -1,5 +1,8 @@
 pub mod builder;
+pub mod classify;
+pub mod fax;
 pub mod images;
 pub mod merger;
+pub(crate) mod placements;
 pub mod reader;
 pub mod writer;

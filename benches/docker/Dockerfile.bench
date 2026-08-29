@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1
+#
+# Benchmark harness for presse.
+#
+# Builds the release binary with native codegen (`-C target-cpu=native` →
+# AVX2/FMA auto-vectorization) in an isolated container, then runs hyperfine
+# comparing the rayon-parallel image pipeline against the same binary pinned
+# to a single thread (`RAYON_NUM_THREADS=1`) — the baseline control.
+#
+#   docker build -t presse-bench -f benches/docker/Dockerfile.bench .
+#   docker run --rm presse-bench
+
+FROM rust:1.96-bookworm AS build
+
+WORKDIR /app
+COPY . .
+
+# Native codegen: enables AVX2/FMA auto-vectorization inside the container.
+ENV RUSTFLAGS="-C target-cpu=native"
+RUN cargo build --release \
+ && cargo build --release --example gen_corpus
+
+FROM debian:bookworm-slim
+
+# hyperfine for timing, poppler-utils for PDF validation (pdfinfo/pdftoppm),
+# mupdf-tools for the mutool clean -gggg -z (lossless repack) comparison,
+# pngquant + tesseract-ocr-eng for the ocrmypdf optimizer leg of the Pareto
+# sweep (its --optimize 2/3 mode hard-requires pngquant), `time` for
+# peak-RSS measurement.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends hyperfine poppler-utils mupdf-tools pngquant tesseract-ocr-eng time \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /app/target/release/presse /usr/local/bin/presse
+COPY --from=build /app/target/release/examples/gen_corpus /usr/local/bin/gen_corpus
+COPY benches/docker/bench.sh /usr/local/bin/bench.sh
+
+ENTRYPOINT ["/usr/local/bin/bench.sh"]

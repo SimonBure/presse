@@ -39,7 +39,7 @@ jobs:
       # The codebase is clippy-clean at default lint levels, so warnings are
       # denied from the start rather than accumulating an allowlist later.
       - name: Clippy
-        run: cargo clippy --release --all-targets --locked -- -D warnings
+        run: cargo clippy --release --all-features --all-targets --locked -- -D warnings
 
   validity:
     name: Build and validity gate
@@ -68,10 +68,13 @@ jobs:
       # --locked fails if Cargo.lock is stale rather than silently resolving
       # different versions than the ones that were reviewed.
       - name: Build
-        run: cargo build --release --locked
+        run: cargo build --release --locked --all-features
 
+      # No optional features remain on this branch (the GPU and `optimize`
+      # surfaces moved to dedicated branches); --all-features is a no-op and
+      # kept for CI-stability with the upstream flow.
       - name: Tests
-        run: cargo test --release --locked
+        run: cargo test --release --locked --all-features
 
       - name: Generate fixtures
         run: python3 ci/make_fixtures.py tests/fixtures

@@ -42,3 +42,6 @@ tests/fixtures/
 
 __pycache__/
 *.pyc
+
+# Local debugging scratch
+.scratch/
