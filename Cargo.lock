@@ -155,7 +155,7 @@ dependencies = [
  "num-traits",
  "pastey",
  "rayon",
- "thiserror",
+ "thiserror 2.0.18",
  "v_frame",
  "y4m",
 ]
@@ -181,6 +181,57 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7178fe5f7d460b13895ebb9dcb28a3a6216d2df2574a0806cb51b555d297f38"
 dependencies = [
  "arrayvec",
+]
+
+[[package]]
+name = "baracuda-build"
+version = "0.0.1-alpha.79"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e52912a680fff79e55bc7e4fa439d668a89ed2b6b5171c3e2c4f7a5bbac363ed"
+
+[[package]]
+name = "baracuda-core"
+version = "0.0.1-alpha.79"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6ee87a096eec6a027cf0095a24ed2311a8746763d62908a4f2c552bea71e41b"
+dependencies = [
+ "baracuda-types",
+ "libloading",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "baracuda-cuda-sys"
+version = "0.0.1-alpha.79"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "488d91922c3873538ec99891857d89d7ca012c95c90fe56760d04af27008967e"
+dependencies = [
+ "baracuda-build",
+ "baracuda-core",
+ "baracuda-types",
+ "libloading",
+]
+
+[[package]]
+name = "baracuda-nvjpeg-sys"
+version = "0.0.1-alpha.79"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1747fd74cc59fe7a423ad235fe1da7245145fd4fbe9d0677574b2d5b5f249fe"
+dependencies = [
+ "baracuda-build",
+ "baracuda-core",
+ "baracuda-cuda-sys",
+ "baracuda-types",
+ "libloading",
+]
+
+[[package]]
+name = "baracuda-types"
+version = "0.0.1-alpha.79"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "610b44d5646eeea782c4319c2903c2c1e0e2efcbceba4ec8a34405bbbae1c118"
+dependencies = [
+ "unpopped-vocab",
 ]
 
 [[package]]
@@ -567,6 +618,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "float8"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2d1f04709a8ac06e8e8042875a3c466cc4832d3c1a18dbcb9dba3c6e83046bc"
+dependencies = [
+ "half",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -877,6 +937,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
+
+[[package]]
 name = "libmimalloc-sys"
 version = "0.1.49"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -925,7 +995,7 @@ dependencies = [
  "rayon",
  "sha2",
  "stringprep",
- "thiserror",
+ "thiserror 2.0.18",
  "time",
  "weezl 0.2.1",
 ]
@@ -1163,11 +1233,14 @@ dependencies = [
 name = "presse"
 version = "0.4.0"
 dependencies = [
+ "baracuda-cuda-sys",
+ "baracuda-nvjpeg-sys",
  "clap",
  "flate2",
  "image",
  "indicatif",
  "jpeg-encoder",
+ "libloading",
  "lopdf",
  "memmap2",
  "mimalloc",
@@ -1326,7 +1399,7 @@ dependencies = [
  "rand 0.9.4",
  "rand_chacha",
  "simd_helpers",
- "thiserror",
+ "thiserror 2.0.18",
  "v_frame",
  "wasm-bindgen",
 ]
@@ -1478,11 +1551,31 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+dependencies = [
+ "thiserror-impl 1.0.69",
+]
+
+[[package]]
+name = "thiserror"
 version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
 dependencies = [
- "thiserror-impl",
+ "thiserror-impl 2.0.18",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -1593,6 +1686,16 @@ name = "unicode-width"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+
+[[package]]
+name = "unpopped-vocab"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "888b91fce50927b092f9119c1a78938f3698c3433fedb90f19c3bcf8241c66ac"
+dependencies = [
+ "float8",
+ "half",
+]
 
 [[package]]
 name = "utf8parse"

@@ -18,6 +18,13 @@ eula = false
 
 [features]
 default = []
+# NVIDIA nvJPEG backend (--acceleration cuda). Loads libnvjpeg at runtime via
+# baracuda's dynamic loader — no CUDA toolkit needed to build, no link-time
+# driver dependency. baracuda-cuda-sys supplies CUDA streams and pinned host
+# memory for the async pipeline.
+cuda = ["dep:baracuda-nvjpeg-sys", "dep:baracuda-cuda-sys", "dep:libloading"]
+# AMD rocJPEG backend (--acceleration rocm). Loads librocjpeg at runtime.
+rocm = ["dep:libloading"]
 
 [dependencies]
 # PDF manipulation
@@ -40,6 +47,11 @@ flate2 = { version = "1.1", features = ["zlib-rs"] }
 
 # Zero-copy input reads
 memmap2 = "0.9"
+
+# GPU backends (optional, see [features])
+baracuda-nvjpeg-sys = { version = "0.0.1-alpha.79", optional = true }
+baracuda-cuda-sys = { version = "0.0.1-alpha.79", optional = true }
+libloading = { version = "0.8", optional = true }
 
 # Faster allocation for the many small buffers rayon workers create.
 mimalloc = "0.1"

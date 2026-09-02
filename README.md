@@ -257,6 +257,52 @@ presse merge a.pdf b.pdf --compress
 | `-o, --output` | `merged.pdf` | Output file or directory |
 | `-c, --compress` | `false` | Compress images in the merged document |
 
+## GPU acceleration (experimental)
+
+`presse press` can offload JPEG re-encoding to a GPU with
+`--acceleration cuda` (NVIDIA nvJPEG) or `--acceleration rocm` (AMD
+rocJPEG). This is experimental, opt-in work — neither backend is linked
+into the release binaries, neither runs in CI, and the CPU backend is the
+default and always available. On a default build, `--acceleration cuda`
+or `rocm` fails with an explicit "requires a build with the … feature"
+error; build with the feature enabled to use them:
+
+```bash
+# NVIDIA
+cargo install presse --features cuda --locked
+
+# AMD
+cargo install presse --features rocm --locked
+```
+
+`--locked` matters: the `baracuda` requirement is a caret range over
+pre-releases, so without it Cargo may resolve a version the code has not
+been tested against.
+
+Runtime needs:
+
+- **cuda** — an NVIDIA driver and the `nvjpeg` shared library. No CUDA
+  toolkit is needed to *build*: the vendor library is loaded at runtime.
+  Baseline 4:2:0 JPEGs are additionally decoded on the NVDEC hardware
+  engine through the Video Codec SDK. The SDK's library (`libnvcuvid.so.1`)
+  ships with the driver; its API declarations come from the SDK headers
+  (`ffnvcodec-headers` on Debian/Ubuntu — the NVDEC stage is written
+  against the cuvid API they declare), so install both. The NV12→planar
+  conversion runs a tiny kernel that ships as embedded PTX, JIT-compiled
+  by the driver. Progressive / 4:2:2 / 4:4:4 JPEGs keep the nvJPEG decode
+  path. Validated on an RTX 4080 SUPER with CUDA 13.3 (verify with
+  `cargo run --release --features cuda --example nvdec_verify`).
+- **rocm** — compile-tested only; requires a ROCm installation with
+  `rocjpeg` at runtime.
+
+If the driver or library is missing at runtime, presse warns and falls
+back to the CPU encoder per stream — a broken GPU can never drop or
+corrupt a stream. The NVDEC stage is optional the same way: when
+`libnvcuvid` or the PTX JIT is unavailable, decode stays on nvJPEG
+(`PRESSE_NO_NVDEC=1` forces that path). Measured behavior (threshold
+routing, speed vs size tradeoffs) is documented in
+[`benches/docker/RESULTS.md`](benches/docker/RESULTS.md).
+
 ## Limitations
 
 - CMYK images are not compressed (not currently handled by `image` crate)
@@ -266,6 +312,14 @@ presse merge a.pdf b.pdf --compress
 **A Rust toolchain (1.85+ — the workspace uses edition 2024) is the only
 build requirement.** The default CPU pipeline is pure Rust: Cargo compiles
 every dependency from source, and no system C library is linked or needed.
+The optional GPU backends load vendor libraries at runtime; building them
+needs no CUDA toolkit:
+
+| To use… | You need… |
+|---|---|
+| `--features cuda` (nvJPEG) | an NVIDIA driver and `libnvjpeg` (loaded at runtime — no CUDA toolkit needed to *build*) |
+| `--features cuda`, NVDEC stage | the above plus the Video Codec SDK: the driver's `libnvcuvid.so.1` **and** the SDK headers (`ffnvcodec-headers` on Debian/Ubuntu, `/usr/include/ffnvcodec/dynlink_nvcuvid.h`) |
+| `--features rocm` | a ROCm installation with `rocjpeg` at runtime |
 
 The regression suite and the benchmark harness additionally want the usual
 PDF tooling (never needed to build, and never needed just to compress a

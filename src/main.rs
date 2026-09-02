@@ -18,7 +18,7 @@ use pdf::reader::{
     get_compression_ratio_in_percent, get_pdf_size_in_kilobytes, load_input_as_pdf, load_pdf,
 };
 use pdf::writer::{compress_and_save_pdf, recompress_flate as recompress_flate_streams, save_pdf};
-use transcode::CpuTranscoder;
+use transcode::resolve;
 
 use clap::Parser;
 use cli::args::{
@@ -36,6 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             input,
             output,
             quality,
+            acceleration,
             dpi,
             ssim,
             palette,
@@ -44,8 +45,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             raster_classify,
             verbose,
         } => {
-            // `--jpeg-encoder` selects the 4:2:0 CPU codec.
-            let transcoder = CpuTranscoder::new(jpeg_encoder);
+            // Resolve the transcoding backend up front: requesting a backend
+            // that was not compiled in is an explicit error; a compiled-in
+            // backend whose driver is missing warns and falls back to CPU.
+            // `--jpeg-encoder` selects the 4:2:0 codec for the CPU path.
+            let transcoder = resolve(acceleration, jpeg_encoder)?;
             let bar = ProgressBar::new(input.len() as u64);
             bar.set_style(
                 ProgressStyle::default_bar()

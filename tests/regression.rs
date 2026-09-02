@@ -20,7 +20,10 @@ use lopdf::content::{Content, Operation};
 use lopdf::{Document, Object, Stream, dictionary};
 use presse::pdf::images::{QualityMode, compress_images, compress_images_with};
 use presse::pdf::writer::{compress_and_save_pdf, recompress_flate, renumber_objects, save_pdf};
-use presse::transcode::CpuTranscoder;
+use presse::transcode::{
+    Acceleration, CpuTranscoder, FallbackTranscoder, ImageTranscoder, Input, RuntimeTranscoder,
+    TranscodeError, resolve,
+};
 
 const QUALITY: u8 = 50;
 
@@ -1159,6 +1162,194 @@ fn press_cli_dpi_flag_resamples_and_stays_valid() {
     assert_eq!(dict.get(b"Width").and_then(|w| w.as_i64()).ok(), Some(208));
     assert_eq!(dict.get(b"Height").and_then(|h| h.as_i64()).ok(), Some(208));
     assert_visual_similarity(&dir, "dpi-cli", 0.85);
+}
+
+// ---------------------------------------------------------------------------
+// Pluggable acceleration (`--acceleration`) — all testable without a GPU.
+// ---------------------------------------------------------------------------
+
+/// A GPU backend that always fails, standing in for "driver disabled at
+/// runtime". Proves [`FallbackTranscoder`] degrades to CPU without dropping
+/// or corrupting a stream (acceptance criterion 3).
+struct FailingGpu;
+
+impl ImageTranscoder for FailingGpu {
+    fn transcode_image(&self, _input: &Input, _quality: u8) -> Result<Vec<u8>, TranscodeError> {
+        Err(TranscodeError::Gpu("simulated driver failure".into()))
+    }
+}
+
+/// A GPU backend that records how often it is consulted.
+struct RecordingGpu(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl ImageTranscoder for RecordingGpu {
+    fn transcode_image(&self, _input: &Input, _quality: u8) -> Result<Vec<u8>, TranscodeError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(Vec::new())
+    }
+}
+
+/// With the driver "disabled", the fallback transcoder must produce output
+/// byte-identical to the pure-CPU path, and that output must pass the full
+/// structural + visual gates.
+#[test]
+fn gpu_failure_falls_back_to_cpu_identically() {
+    let dir = test_dir();
+    let build = || {
+        let (mut doc, pages_id) = new_doc();
+        for _ in 0..8 {
+            add_image_page(&mut doc, pages_id, photoish_rgb(96, 96), 96, 96, false);
+        }
+        doc
+    };
+
+    let mut cpu_doc = build();
+    compress_images(&mut cpu_doc, QUALITY, false);
+
+    // threshold 0 → every stream consults the (failing) GPU first.
+    let fallback = FallbackTranscoder::new(Some(FailingGpu), 0);
+    let mut fb_doc = build();
+    compress_images_with(
+        &mut fb_doc,
+        QualityMode::fixed(QUALITY),
+        false,
+        &fallback,
+        None,
+        false,
+        false,
+    );
+
+    let (cpu_path, fb_path) = (
+        dir.join("gpu-fallback-pre.pdf"),
+        dir.join("gpu-fallback-post.pdf"),
+    );
+    compress_and_save_pdf(&mut cpu_doc, cpu_path.to_str().unwrap(), false).unwrap();
+    compress_and_save_pdf(&mut fb_doc, fb_path.to_str().unwrap(), false).unwrap();
+
+    assert_eq!(
+        std::fs::read(&cpu_path).unwrap(),
+        std::fs::read(&fb_path).unwrap(),
+        "fallback output must be byte-identical to the CPU backend"
+    );
+    assert_well_formed(&fb_path);
+    assert_visual_similarity(&dir, "gpu-fallback", 0.99);
+}
+
+/// Streams below the PCIe-latency threshold must never reach the GPU;
+/// larger streams must. (No GPU is involved — the recording backend
+/// simulates one.)
+#[test]
+fn gpu_routing_respects_stream_size_threshold() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let fallback = FallbackTranscoder::new(
+        Some(RecordingGpu(std::sync::Arc::clone(&calls))),
+        128 * 1024,
+    );
+
+    // Below the threshold: CPU only (decode of garbage fails, but that is
+    // irrelevant — the GPU must not have been consulted).
+    let small = Input::Jpeg(&[0u8; 1024]);
+    assert!(fallback.transcode_image(&small, QUALITY).is_err());
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "small streams stay on CPU"
+    );
+
+    // Above the threshold: GPU first.
+    let large = Input::Jpeg(&vec![0u8; 200_000]);
+    let buf = fallback.transcode_image(&large, QUALITY).unwrap();
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "large streams reach the GPU"
+    );
+    assert!(buf.is_empty());
+}
+
+/// Requesting a backend that was not compiled in must fail with an explicit
+/// error naming the missing Cargo flag — never a crash (requirement 1.3).
+#[test]
+fn unbuilt_acceleration_is_an_explicit_error() {
+    #[cfg(not(feature = "cuda"))]
+    {
+        let err = resolve(Acceleration::Cuda, false).unwrap_err();
+        assert!(
+            err.contains("--features cuda"),
+            "error must name the missing flag: {err}"
+        );
+    }
+    #[cfg(not(feature = "rocm"))]
+    {
+        let err = resolve(Acceleration::Rocm, false).unwrap_err();
+        assert!(
+            err.contains("--features rocm"),
+            "error must name the missing flag: {err}"
+        );
+    }
+    // cpu always resolves; auto resolves to cpu without a driver.
+    assert!(matches!(
+        resolve(Acceleration::Cpu, false),
+        Ok(RuntimeTranscoder::Cpu(_))
+    ));
+    #[cfg(not(any(feature = "cuda", feature = "rocm")))]
+    assert!(matches!(
+        resolve(Acceleration::Auto, false),
+        Ok(RuntimeTranscoder::Cpu(_))
+    ));
+}
+
+/// The CLI must reject `--acceleration cuda` on a build without the feature
+/// with a clear error, and accept the default `cpu` path.
+#[test]
+fn press_cli_acceleration_flag() {
+    let dir = test_dir();
+    let (mut doc, pages_id) = new_doc();
+    for _ in 0..3 {
+        add_image_page(&mut doc, pages_id, photoish_rgb(96, 96), 96, 96, false);
+    }
+    save_pdf(&mut doc, dir.join("acc-in.pdf").to_str().unwrap()).unwrap();
+    let presse = env!("CARGO_BIN_EXE_presse");
+
+    // Default CPU path with the explicit flag.
+    let ok = Command::new(presse)
+        .args([
+            "press",
+            dir.join("acc-in.pdf").to_str().unwrap(),
+            "-a",
+            "cpu",
+            "-o",
+            dir.join("acc-cpu.pdf").to_str().unwrap(),
+        ])
+        .status()
+        .expect("presse binary should run");
+    assert!(ok.success(), "-a cpu must succeed");
+    assert_well_formed(&dir.join("acc-cpu.pdf"));
+
+    // Unbuilt backend → explicit error.
+    #[cfg(not(feature = "cuda"))]
+    {
+        let run = Command::new(presse)
+            .args([
+                "press",
+                dir.join("acc-in.pdf").to_str().unwrap(),
+                "-a",
+                "cuda",
+                "-o",
+                dir.join("acc-cuda.pdf").to_str().unwrap(),
+            ])
+            .output()
+            .expect("presse binary should run");
+        assert!(
+            !run.status.success(),
+            "-a cuda must fail without the feature"
+        );
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(
+            stderr.contains("--features cuda"),
+            "stderr must name the missing flag: {stderr}"
+        );
+    }
 }
 
 /// The CPU transcoder is the zero-cost default: `compress_images_with` over
