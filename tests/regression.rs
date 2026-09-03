@@ -15,9 +15,13 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(feature = "optimize")]
+use image::GenericImageView;
 use image::GrayImage;
 use lopdf::content::{Content, Operation};
 use lopdf::{Document, Object, Stream, dictionary};
+#[cfg(feature = "optimize")]
+use presse::pdf::images::{CompressOptions, compress_images_opt};
 use presse::pdf::images::{QualityMode, compress_images, compress_images_with};
 use presse::pdf::writer::{compress_and_save_pdf, recompress_flate, renumber_objects, save_pdf};
 use presse::transcode::{
@@ -2542,4 +2546,1355 @@ fn recompress_flate_flag_recompresses_existing_flate_streams() {
     );
     let loaded = assert_well_formed(&dir.join("refl-flag.pdf"));
     assert_eq!(loaded.get_pages().len(), 1);
+}
+// ---------------------------------------------------------------------------
+// `optimize`-feature passes (`--dedup`, `--zopfli`, `--font-subset`,
+// `--jbig2`, `--jpeg2000`, `--mrc`, `--compression`). Everything here is
+// default-off and feature-gated; the default build never reaches it.
+// ---------------------------------------------------------------------------
+
+/// `--dedup`: byte-identical non-image streams (fonts/ICC/XForms/arbitrary)
+/// collapse onto one canonical object with every reference rewritten, and the
+/// surviving document stays well-formed.
+#[test]
+#[cfg(feature = "optimize")]
+fn dedup_coalesces_identical_non_image_streams() {
+    use presse::pdf::optimize::dedup_streams;
+
+    let dir = test_dir();
+    let (mut doc, pages_id) = new_doc();
+    // Two byte-identical "font" streams in separate resource scopes.
+    let payload = b"\x00\x01\x02fake-font-program-bytes\xff\xfe".to_vec();
+    let mut mk = |name: &str| {
+        let mut s = Stream::new(
+            dictionary! {
+                "Type" => "FontFile2",
+                "Length1" => payload.len() as i64,
+            },
+            payload.clone(),
+        );
+        s.dict.set("Length", s.content.len() as i64);
+        s.dict.set("Name", name);
+        doc.add_object(Object::Stream(s))
+    };
+    let (id_a, id_b) = (mk("FontFileA"), mk("FontFileB"));
+    let content = Content {
+        operations: vec![Operation::new("q", vec![])],
+    };
+    let content_id = doc.add_object(Object::Stream(Stream::new(
+        dictionary! {},
+        content.encode().unwrap(),
+    )));
+    let page_id = doc.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Contents" => content_id,
+        "Resources" => dictionary! {
+            "Font" => dictionary! { "F1" => id_a },
+            "XObject" => dictionary! { "F2" => id_b },
+        },
+    });
+    push_kid(&mut doc, pages_id, page_id);
+
+    let removed = dedup_streams(&mut doc);
+    assert_eq!(removed, 1, "exactly one duplicate stream must be removed");
+    assert!(
+        doc.objects.contains_key(&id_a),
+        "the canonical stream must survive"
+    );
+    assert!(
+        !doc.objects.contains_key(&id_b),
+        "the duplicate stream must be removed"
+    );
+    // The surviving reference now points at the canonical object.
+    let page = doc.get_object(page_id).unwrap().as_dict().unwrap();
+    let xobj = page
+        .get(b"Resources")
+        .unwrap()
+        .as_dict()
+        .unwrap()
+        .get(b"XObject")
+        .unwrap()
+        .as_dict()
+        .unwrap();
+    assert_eq!(
+        xobj.get(b"F2").unwrap().as_reference().unwrap(),
+        id_a,
+        "references to the duplicate must be rewritten to the canonical object"
+    );
+    compress_and_save_pdf(&mut doc, dir.join("dedup.pdf").to_str().unwrap(), false).unwrap();
+    let loaded = assert_well_formed(&dir.join("dedup.pdf"));
+    assert_eq!(loaded.get_pages().len(), 1);
+}
+
+/// `--zopfli`: recompressing a level-1 Flate stream with Zopfli yields a
+/// strictly smaller stream that decodes to the same bytes.
+#[test]
+#[cfg(feature = "optimize")]
+fn zopfli_recompresses_flate_strictly_smaller() {
+    use flate2::write::ZlibEncoder;
+    use presse::pdf::optimize::recompress_flate_zopfli;
+    use std::io::Write;
+
+    let dir = test_dir();
+    let (mut doc, pages_id) = new_doc();
+    // Highly repetitive content: level 1 leaves a lot on the table that
+    // Zopfli's search recovers.
+    let text = b"The quick brown fox jumps over the lazy dog. ".repeat(400);
+    let mut level1 = Vec::new();
+    ZlibEncoder::new(&mut level1, flate2::Compression::new(1))
+        .write_all(&text)
+        .unwrap();
+    let mut s = Stream::new(dictionary! {}, level1.clone());
+    s.dict.set("Filter", "FlateDecode");
+    s.dict.set("Length", s.content.len() as i64);
+    let stream_id = doc.add_object(Object::Stream(s));
+    let page_id = doc.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        "Contents" => stream_id,
+        "Resources" => dictionary! {},
+    });
+    push_kid(&mut doc, pages_id, page_id);
+
+    let n = recompress_flate_zopfli(&mut doc);
+    assert_eq!(n, 1, "the level-1 stream must be recompressed");
+    let Object::Stream(stream) = doc.objects.get(&stream_id).unwrap() else {
+        panic!("stream must survive");
+    };
+    assert!(
+        stream.content.len() < level1.len(),
+        "zopfli must beat level-1 deflate: {} vs {}",
+        stream.content.len(),
+        level1.len()
+    );
+    assert_eq!(
+        stream.decompressed_content().unwrap(),
+        text,
+        "the recompressed stream must decode to the identical bytes"
+    );
+    compress_and_save_pdf(&mut doc, dir.join("zopfli.pdf").to_str().unwrap(), false).unwrap();
+    let _ = assert_well_formed(&dir.join("zopfli.pdf"));
+}
+
+/// The brutal `/ImageMask`-style trap applied to the JBIG2 candidate: a
+/// colored rectangle beneath the raster, a non-black nonstroking color in
+/// effect before `Do`. The JBIG2 1-bit image must stay an *opaque*
+/// DeviceGray image (never a stencil) and render pixel-identically.
+#[test]
+#[cfg(feature = "optimize")]
+fn jbig2_mask_is_opaque_over_colored_background() {
+    let dir = test_dir();
+    if !ensure_tool("pdftoppm", pdftoppm_available()) {
+        return;
+    }
+    let (w, h) = (320u32, 240u32);
+    let mut text = vec![255u8; (w * h * 3) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            if (x / 24) % 3 == 0 && y % 9 < 5 {
+                let p = ((y * w + x) * 3) as usize;
+                text[p..p + 3].copy_from_slice(&[0, 0, 0]);
+            }
+        }
+    }
+
+    let build = |dir: &Path, name: &str, jbig2: bool| {
+        let (mut doc, pages_id) = new_doc();
+        let mut image_dict = dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Image",
+            "Width" => w as i64,
+            "Height" => h as i64,
+            "BitsPerComponent" => 8,
+        };
+        image_dict.set("ColorSpace", "DeviceRGB");
+        let mut image_stream = Stream::new(image_dict, text.clone());
+        image_stream.compress().unwrap();
+        let image_id = doc.add_object(image_stream);
+        let content = Content {
+            operations: vec![
+                Operation::new("rg", vec![0.0.into(), 0.0.into(), 1.0.into()]),
+                Operation::new("re", vec![0.into(), 0.into(), 612.into(), 792.into()]),
+                Operation::new("f", vec![]),
+                Operation::new("rg", vec![1.0.into(), 0.0.into(), 0.0.into()]),
+                Operation::new("q", vec![]),
+                Operation::new(
+                    "cm",
+                    vec![w.into(), 0.into(), 0.into(), h.into(), 50.into(), 50.into()],
+                ),
+                Operation::new("Do", vec![Object::Name(b"Im0".to_vec())]),
+                Operation::new("Q", vec![]),
+            ],
+        };
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+            "Resources" => dictionary! { "XObject" => dictionary! { "Im0" => image_id } },
+        });
+        push_kid(&mut doc, pages_id, page_id);
+        compress_images_opt(
+            &mut doc,
+            QualityMode::fixed(QUALITY),
+            false,
+            &CpuTranscoder::default(),
+            CompressOptions {
+                jbig2,
+                ..CompressOptions::default()
+            },
+        );
+        save_pdf(&mut doc, dir.join(name).to_str().unwrap()).unwrap();
+    };
+
+    build(&dir, "jbig2-pre.pdf", false);
+    build(&dir, "jbig2-post.pdf", true);
+
+    let loaded = assert_well_formed(&dir.join("jbig2-post.pdf"));
+    let images = find_image_streams(&loaded);
+    assert_eq!(images.len(), 1);
+    let (_, _, dict) = &images[0];
+    assert_eq!(
+        dict.get(b"Filter").and_then(|f| f.as_name()).ok(),
+        Some(b"JBIG2Decode".as_slice())
+    );
+    assert_eq!(
+        dict.get(b"ColorSpace").and_then(|c| c.as_name()).ok(),
+        Some(b"DeviceGray".as_slice()),
+        "bitonal JBIG2 must be an opaque DeviceGray image"
+    );
+    assert!(
+        dict.get(b"ImageMask").is_err(),
+        "bitonal JBIG2 must not be an /ImageMask stencil"
+    );
+    // JBIG2's decode polarity is the identity [0 1] (poppler inverts its
+    // samples), so the /Decode entry must be absent or [0 1], never [1 0].
+    match dict.get(b"Decode") {
+        Err(_) => {}
+        Ok(Object::Array(a)) => {
+            let vals: Vec<i64> = a.iter().filter_map(|o| o.as_i64().ok()).collect();
+            assert_eq!(vals, vec![0, 1], "JBIG2 masks use the identity /Decode");
+        }
+        Ok(_) => panic!("unexpected /Decode type"),
+    }
+
+    let (pre, post) = (dir.join("jbig2-pre"), dir.join("jbig2-post"));
+    assert!(
+        render_first_page(&dir.join("jbig2-pre.pdf"), &pre),
+        "pdftoppm failed on jbig2-pre.pdf"
+    );
+    assert!(
+        render_first_page(&dir.join("jbig2-post.pdf"), &post),
+        "pdftoppm failed on jbig2-post.pdf"
+    );
+    let a = image::open(pre.with_extension("png")).unwrap().to_luma8();
+    let b = image::open(post.with_extension("png")).unwrap().to_luma8();
+    assert_eq!(a.dimensions(), b.dimensions());
+    let diff = a
+        .pixels()
+        .zip(b.pixels())
+        .filter(|(x, y)| x[0] != y[0])
+        .count();
+    assert_eq!(
+        diff, 0,
+        "JBIG2 mask must render pixel-identically to the source raster \
+         ({diff} px differ; a stencil would show the blue through the white)"
+    );
+}
+
+/// The same brutal trap applied to the MRC composite: blue rectangle under
+/// the raster, red nonstroking color before `Do`. The source is a grainy
+/// scan (pseudo-random paper noise + rules) — the regime where the composite
+/// deterministically wins the size court (Flate cannot compress the grain,
+/// JPEG pays photographic cost for it, but the bitonal mask + downsampled
+/// background is tiny). The composite must render pixel-identically to the
+/// equivalent `--raster-classify` G4 output: the background stays opaque
+/// (hiding the blue), the ink stays black (ignoring the red color), and the
+/// mask's compositing is under presse's control throughout.
+#[test]
+#[cfg(feature = "optimize")]
+fn mrc_composite_is_opaque_over_colored_background() {
+    let dir = test_dir();
+    if !ensure_tool("pdftoppm", pdftoppm_available()) {
+        return;
+    }
+    let (w, h) = (1600u32, 1200u32);
+    let mut text = vec![255u8; (w * h * 3) as usize];
+    let mut state = 0x9E3779B97F4A7C15u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for i in 0..(w as usize * h as usize) {
+        let line = if (i / w as usize).is_multiple_of(17) {
+            24
+        } else {
+            0
+        };
+        let v = 245u8.wrapping_sub(line).wrapping_sub((next() & 0x0f) as u8);
+        let p = i * 3;
+        text[p..p + 3].copy_from_slice(&[v, v, v]);
+    }
+
+    let build = |dir: &Path, name: &str, classify: bool, mrc: bool| {
+        let (mut doc, pages_id) = new_doc();
+        let mut image_dict = dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Image",
+            "Width" => w as i64,
+            "Height" => h as i64,
+            "BitsPerComponent" => 8,
+        };
+        image_dict.set("ColorSpace", "DeviceRGB");
+        let mut image_stream = Stream::new(image_dict, text.clone());
+        image_stream.compress().unwrap();
+        let image_id = doc.add_object(image_stream);
+        let content = Content {
+            operations: vec![
+                Operation::new("rg", vec![0.0.into(), 0.0.into(), 1.0.into()]),
+                Operation::new("re", vec![0.into(), 0.into(), 612.into(), 792.into()]),
+                Operation::new("f", vec![]),
+                Operation::new("rg", vec![1.0.into(), 0.0.into(), 0.0.into()]),
+                Operation::new("q", vec![]),
+                Operation::new(
+                    "cm",
+                    vec![
+                        600.into(),
+                        0.into(),
+                        0.into(),
+                        450.into(),
+                        6.into(),
+                        170.into(),
+                    ],
+                ),
+                Operation::new("Do", vec![Object::Name(b"Im0".to_vec())]),
+                Operation::new("Q", vec![]),
+            ],
+        };
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+            "Resources" => dictionary! { "XObject" => dictionary! { "Im0" => image_id } },
+        });
+        push_kid(&mut doc, pages_id, page_id);
+        compress_images_opt(
+            &mut doc,
+            QualityMode::fixed(QUALITY),
+            false,
+            &CpuTranscoder::default(),
+            CompressOptions {
+                classify,
+                mrc,
+                ..CompressOptions::default()
+            },
+        );
+        save_pdf(&mut doc, dir.join(name).to_str().unwrap()).unwrap();
+    };
+
+    build(&dir, "mrc-pre.pdf", false, false);
+    build(&dir, "mrc-g4.pdf", true, false);
+    build(&dir, "mrc-post.pdf", false, true);
+
+    // The MRC composite: a 1×1 paper-color background + a 1×1 foreground
+    // with the G4 mask as its /SMask. The background is deliberately a flat
+    // image, not a JPEG: near-flat JPEG bitstreams are mis-decoded as
+    // full-page gradients by poppler and Ghostscript (verified against the
+    // `image` crate, libjpeg, and PIL encoders). The mask is a full image
+    // XObject: Ghostscript silently drops a soft mask whose stream lacks
+    // /Type /XObject + /Subtype /Image (the foreground then vanishes).
+    let loaded = assert_well_formed(&dir.join("mrc-post.pdf"));
+    let images = find_image_streams(&loaded);
+    let bg = images
+        .iter()
+        .find(|(_, _, d)| {
+            d.get(b"Width").and_then(|w| w.as_i64()).ok() == Some(1) && d.get(b"SMask").is_err()
+        })
+        .expect("the MRC background must be the 1×1 paper-color layer");
+    assert_eq!(
+        bg.2.get(b"Filter").and_then(|f| f.as_name()).ok(),
+        None,
+        "the background must be a raw 1×1 image, never a JPEG"
+    );
+    assert_eq!(
+        bg.2.get(b"ColorSpace").and_then(|c| c.as_name()).ok(),
+        Some(b"DeviceRGB".as_slice()),
+        "the background must be DeviceRGB"
+    );
+    let fg = images
+        .iter()
+        .find(|(_, _, d)| {
+            d.get(b"Width").and_then(|w| w.as_i64()).ok() == Some(1) && d.get(b"SMask").is_ok()
+        })
+        .expect("the MRC foreground must be the 1×1 solid-color layer");
+    let smask = fg.2.get(b"SMask").unwrap().as_reference().unwrap();
+    let Object::Stream(mask) = loaded.objects.get(&smask).unwrap() else {
+        panic!("SMask must be a stream");
+    };
+    assert_eq!(
+        mask.dict.get(b"Filter").and_then(|f| f.as_name()).ok(),
+        Some(b"CCITTFaxDecode".as_slice()),
+        "the MRC mask must be CCITT G4"
+    );
+    assert_eq!(
+        mask.dict.get(b"Width").and_then(|w| w.as_i64()).ok(),
+        Some(w as i64),
+        "the mask must be full resolution"
+    );
+    match mask.dict.get(b"Decode") {
+        Ok(Object::Array(a)) => {
+            let vals: Vec<i64> = a.iter().filter_map(|o| o.as_i64().ok()).collect();
+            assert_eq!(vals, vec![0, 1], "SMask identity decode: ink → opaque");
+        }
+        _ => panic!("SMask must carry the identity /Decode"),
+    }
+    assert_eq!(
+        mask.dict.get(b"Type").and_then(|t| t.as_name()).ok(),
+        Some(b"XObject".as_slice()),
+        "the SMask must be a typed XObject (Ghostscript drops untyped soft masks)"
+    );
+    assert_eq!(
+        mask.dict.get(b"Subtype").and_then(|t| t.as_name()).ok(),
+        Some(b"Image".as_slice()),
+        "the SMask must be an Image XObject (Ghostscript drops it otherwise)"
+    );
+    // bg + fg + the mask itself: the mask is a full image XObject (its
+    // /Subtype /Image is what makes Ghostscript honor the soft mask at all).
+    assert_eq!(
+        images.len(),
+        3,
+        "background + foreground + mask layers only"
+    );
+    // The rewrite must inject the foreground draw *without* re-applying
+    // `cm`: the source image's own transform is still current at the
+    // injection point, so a second `cm` would square the scale (a 1600×1200
+    // placement becomes 2,560,000×1,440,000) and poppler's soft-mask
+    // allocator would overflow on the "Bogus memory allocation size" path,
+    // silently dropping the foreground. The op immediately before the
+    // foreground `Do` must be `q`, with no `cm` inside the injected segment.
+    let fg_draws_without_cm = loaded.objects.values().any(|obj| match obj {
+        Object::Stream(s) => s
+            .decompressed_content()
+            .ok()
+            .and_then(|c| Content::decode(&c).ok())
+            .is_some_and(|content| {
+                content
+                    .operations
+                    .iter()
+                    .position(|op| {
+                        op.operator == "Do"
+                            && matches!(
+                                op.operands.first(),
+                                Some(Object::Name(n)) if n == b"FgMrc0"
+                            )
+                    })
+                    .is_some_and(|do_idx| {
+                        do_idx > 0
+                            && content.operations[do_idx - 1].operator == "q"
+                            && !content.operations[do_idx - 1..=do_idx]
+                                .iter()
+                                .any(|op| op.operator == "cm")
+                    })
+            }),
+        _ => false,
+    });
+    assert!(
+        fg_draws_without_cm,
+        "the content stream must draw the foreground layer without re-applying `cm`"
+    );
+
+    // The brutal assertions under the same blue rectangle + red current
+    // color: (1) the composite must match the flat G4 representation almost
+    // exactly — the only difference is the preserved paper grain, which the
+    // bitonal G4 version throws away; (2) no blue may leak through the paper
+    // and no red may recolor the ink, anywhere in the image area.
+    for name in ["mrc-g4", "mrc-post"] {
+        assert!(
+            render_first_page(&dir.join(format!("{name}.pdf")), &dir.join(name)),
+            "pdftoppm failed on {name}.pdf"
+        );
+    }
+    let g4_dyn = image::open(dir.join("mrc-g4.png")).unwrap();
+    let post_dyn = image::open(dir.join("mrc-post.png")).unwrap();
+    assert_eq!(g4_dyn.dimensions(), post_dyn.dimensions());
+    let score = ssim(&g4_dyn.to_luma8(), &post_dyn.to_luma8());
+    assert!(
+        score >= 0.95,
+        "the MRC composite must closely match the flat G4 representation (SSIM {score:.4})"
+    );
+
+    // Region checks on the composite render: the image occupies
+    // (6,170)-(606,620) pt → (6,170)-(606,620) px at 72 dpi. The check
+    // shrinks the region by a 3-px border on each side: renderers
+    // anti-alias the image boundary against the underlying rectangle (the
+    // flat G4 reference shows the identical 2-px edge stripe), so only the
+    // interior must be leak-free. No blue or red pixel may appear there.
+    let rgb = post_dyn.to_rgb8();
+    let (mut blue, mut red) = (0u32, 0u32);
+    for y in 173..617 {
+        for x in 9..603 {
+            let px = rgb.get_pixel(x, y);
+            let (r, g, b) = (px[0], px[1], px[2]);
+            if b > 200 && r < 60 && g < 60 {
+                blue += 1;
+            }
+            if r > 200 && g < 60 && b < 60 {
+                red += 1;
+            }
+        }
+    }
+    assert_eq!(
+        blue, 0,
+        "the MRC background must stay opaque over the blue rectangle ({blue} blue px leaked)"
+    );
+    assert_eq!(
+        red, 0,
+        "the MRC ink must ignore the current color ({red} red px leaked)"
+    );
+
+    // And the composite must stay a faithful approximation of the grainy
+    // source.
+    assert!(
+        render_first_page(&dir.join("mrc-pre.pdf"), &dir.join("mrc-pre")),
+        "pdftoppm failed on mrc-pre.pdf"
+    );
+    let pre = image::open(dir.join("mrc-pre.png")).unwrap().to_luma8();
+    let score = ssim(&pre, &post_dyn.to_luma8());
+    assert!(
+        score >= 0.80,
+        "the MRC bitonal composite must resemble the grainy source (SSIM {score:.4})"
+    );
+}
+
+/// The mask-fidelity gate: the classifier must *measure* that the bitonal
+/// reconstruction fits the source luma, not just trust its heuristics. A
+/// page that is mostly white/black — so every heuristic rule (near-white +
+/// near-black ≥ 0.6, neutral, glyph-sized components) passes — but contains
+/// a smooth continuous-tone region must NOT be masked: the mask would
+/// discard the region's grayscale variation. Measured on the corpus: clean
+/// grainy scans score ≈ 4.0, this fixture ≈ 15, photographs ≈ 21.
+#[test]
+#[cfg(feature = "optimize")]
+fn classifier_gate_rejects_continuous_tone_on_paper() {
+    use presse::pdf::classify::{RasterClass, classify as classify_raster};
+
+    let (w, h) = (800u32, 600u32);
+    let mut clean = vec![255u8; (w * h * 3) as usize];
+    for y in 0..h {
+        if y % 17 == 0 {
+            for x in 0..w {
+                let p = ((y * w + x) * 3) as usize;
+                clean[p..p + 3].copy_from_slice(&[24, 24, 24]);
+            }
+        }
+    }
+    let d = classify_raster(&clean, w, h);
+    assert_eq!(
+        d.class,
+        RasterClass::BitonalText,
+        "clean black-on-white text must stay bitonal"
+    );
+    assert!(d.mask.is_some(), "bitonal ⇒ a full-resolution mask");
+
+    // Same text plus a 400×300 smooth 60→200 luma gradient: the heuristic
+    // rules all pass (near-white+near-black ≈ 0.75, fully neutral, the text
+    // keeps glyph-sized components) but the bitonal reconstruction error is
+    // ≈ 15 > 10 — the gate must reject it.
+    let mut mixed = clean.clone();
+    for yy in 0..300u32 {
+        let v = 60u32 + (200 - 60) * yy / 300;
+        for xx in 200..600u32 {
+            let p = ((yy * w + xx) * 3) as usize;
+            mixed[p..p + 3].copy_from_slice(&[v as u8, v as u8, v as u8]);
+        }
+    }
+    let d2 = classify_raster(&mixed, w, h);
+    assert_ne!(
+        d2.class,
+        RasterClass::BitonalText,
+        "a continuous-tone region on paper must not be masked"
+    );
+    assert!(d2.mask.is_none(), "rejected bitonal ⇒ no mask");
+}
+
+/// Render the first page at an explicit resolution (the shared helper is 72
+/// dpi; the transform regressions need 300 dpi ink-location precision).
+#[cfg(feature = "optimize")]
+fn render_first_page_at(pdf: &Path, prefix: &Path, dpi: &str) -> bool {
+    let output = Command::new("pdftoppm")
+        .args(["-singlefile", "-png", "-r", dpi, "-f", "1", "-l", "1"])
+        .arg(pdf)
+        .arg(prefix)
+        .output();
+    matches!(output, Ok(out) if out.status.success())
+}
+
+/// The brutal transform regression for `--mrc`: the foreground must land
+/// *exactly* under the source raster when the placement is a general affine
+/// transform (scale + rotation + shear + translation), not axis-aligned
+/// scaling. A rewrite that re-applied the placement `cm` — or otherwise
+/// disturbed the inherited CTM — would displace the ink entirely; this test
+/// compares exact ink locations (300 dpi) between the source render and the
+/// MRC render. The pattern is deliberately asymmetric so any shift shows up
+/// in the ink bounding box, not just in a soft SSIM average.
+#[test]
+#[cfg(feature = "optimize")]
+fn mrc_foreground_lands_exactly_under_affine_transform() {
+    let dir = test_dir();
+    if !ensure_tool("pdftoppm", pdftoppm_available()) {
+        return;
+    }
+    let (w, h) = (900u32, 700u32);
+    let mut px = vec![240u8; (w * h * 3) as usize];
+    let mut state = 0x1234_5678_9ABC_DEF0u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let ink =
+                y % 13 == 0 || (x > 500 && y < 300 && (x - 500) % 7 == 0) || (x + y) % 61 == 0;
+            let v = if ink {
+                18u8
+            } else {
+                240u8.wrapping_sub((next() & 0x0f) as u8)
+            };
+            let p = ((y * w + x) * 3) as usize;
+            px[p..p + 3].copy_from_slice(&[v, v, v]);
+        }
+    }
+
+    // Placement: scale 500×380, rotation ≈ 8°, explicit shear, translation
+    // (60, 210) — a full-rank affine matrix.
+    let (m0, m1, m2, m3, m4, m5) = (495.0, 69.5, 30.0, 376.0, 60.0, 210.0);
+
+    // `raw` = the untouched source (the ground truth for where the ink
+    // lands); `post` = the MRC output. The compressed-but-maskless "pre"
+    // is deliberately not used as the baseline: its JPEG re-encode blurs
+    // the rotated edges, muddying the ink-location comparison.
+    let build = |dir: &Path, name: &str, raw: bool, mrc: bool| {
+        let (mut doc, pages_id) = new_doc();
+        let mut image_dict = dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Image",
+            "Width" => w as i64,
+            "Height" => h as i64,
+            "BitsPerComponent" => 8,
+        };
+        image_dict.set("ColorSpace", "DeviceRGB");
+        let mut image_stream = Stream::new(image_dict, px.clone());
+        image_stream.compress().unwrap();
+        let image_id = doc.add_object(image_stream);
+        let content = Content {
+            operations: vec![
+                Operation::new("q", vec![]),
+                Operation::new(
+                    "cm",
+                    vec![
+                        m0.into(),
+                        m1.into(),
+                        m2.into(),
+                        m3.into(),
+                        m4.into(),
+                        m5.into(),
+                    ],
+                ),
+                Operation::new("Do", vec![Object::Name(b"Im0".to_vec())]),
+                Operation::new("Q", vec![]),
+            ],
+        };
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+            "Resources" => dictionary! { "XObject" => dictionary! { "Im0" => image_id } },
+        });
+        push_kid(&mut doc, pages_id, page_id);
+        if !raw {
+            compress_images_opt(
+                &mut doc,
+                QualityMode::fixed(QUALITY),
+                false,
+                &CpuTranscoder::default(),
+                CompressOptions {
+                    mrc,
+                    ..CompressOptions::default()
+                },
+            );
+        }
+        save_pdf(&mut doc, dir.join(name).to_str().unwrap()).unwrap();
+    };
+
+    build(&dir, "affine-raw.pdf", true, false);
+    build(&dir, "affine-post.pdf", false, true);
+    assert!(
+        render_first_page_at(&dir.join("affine-raw.pdf"), &dir.join("affine-raw"), "300"),
+        "pdftoppm failed on affine-raw.pdf"
+    );
+    assert!(
+        render_first_page_at(
+            &dir.join("affine-post.pdf"),
+            &dir.join("affine-post"),
+            "300"
+        ),
+        "pdftoppm failed on affine-post.pdf"
+    );
+
+    let ink = |img: &GrayImage| {
+        let mut bbox = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+        let mut n = 0u64;
+        for (x, y, p) in img.enumerate_pixels() {
+            if p[0] < 128 {
+                n += 1;
+                bbox.0 = bbox.0.min(x as i64);
+                bbox.1 = bbox.1.min(y as i64);
+                bbox.2 = bbox.2.max(x as i64);
+                bbox.3 = bbox.3.max(y as i64);
+            }
+        }
+        (n, bbox)
+    };
+    let raw = image::open(dir.join("affine-raw.png")).unwrap().to_luma8();
+    let post = image::open(dir.join("affine-post.png")).unwrap().to_luma8();
+    assert_eq!(raw.dimensions(), post.dimensions());
+    let (raw_n, raw_box) = ink(&raw);
+    let (_, post_box) = ink(&post);
+    assert!(raw_n > 0, "the source render must contain ink");
+    // ±2 px on each side: the source went through the JPEG candidate and
+    // the rotated edges anti-alias, so a one-pixel fringe is expected — a
+    // misplaced foreground (the double-`cm` bug) shifts the box by
+    // hundreds of pixels instead.
+    for (a, b, axis) in [
+        (raw_box.0, post_box.0, "min x"),
+        (raw_box.1, post_box.1, "min y"),
+        (raw_box.2, post_box.2, "max x"),
+        (raw_box.3, post_box.3, "max y"),
+    ] {
+        assert!(
+            (a - b).abs() <= 2,
+            "the MRC ink must occupy exactly the source ink's bounding box \
+             ({axis}: {a} vs {b})"
+        );
+    }
+    // Jaccard over ink pixels: the mask is the exact Otsu split, so the
+    // overlap must be near-total (anti-aliased edges are the only slack).
+    let (mut inter, mut union) = (0u64, 0u64);
+    for (a, b) in raw.pixels().zip(post.pixels()) {
+        let (ia, ib) = (a[0] < 128, b[0] < 128);
+        if ia && ib {
+            inter += 1;
+        }
+        if ia || ib {
+            union += 1;
+        }
+    }
+    let jaccard = inter as f64 / union as f64;
+    assert!(
+        jaccard >= 0.97,
+        "the MRC ink must land on the source ink pixels (Jaccard {jaccard:.4})"
+    );
+}
+
+/// MRC inside a self-contained Form XObject: the foreground resource must be
+/// registered in the *form's* `/Resources` (a Form is a stream whose own
+/// dict resolves its content names — not a page dictionary), and the form's
+/// content must gain the foreground draw. Without this, renderers resolve
+/// `/FgMrc0 Do` against a form that never declares it and the foreground
+/// silently vanishes.
+#[test]
+#[cfg(feature = "optimize")]
+fn mrc_inside_self_contained_form_registers_foreground() {
+    let dir = test_dir();
+    if !ensure_tool("pdftoppm", pdftoppm_available()) {
+        return;
+    }
+    let (w, h) = (800u32, 600u32);
+    let mut text = vec![240u8; (w * h * 3) as usize];
+    let mut state = 0x9E3779B97F4A7C15u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let v = if y % 17 == 0 {
+                24
+            } else {
+                240u8.wrapping_sub((next() & 0x0f) as u8)
+            };
+            let p = ((y * w + x) * 3) as usize;
+            text[p..p + 3].copy_from_slice(&[v, v, v]);
+        }
+    }
+
+    let build = |dir: &Path, name: &str, mrc: bool| {
+        let (mut doc, pages_id) = new_doc();
+        let mut image_dict = dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Image",
+            "Width" => w as i64,
+            "Height" => h as i64,
+            "BitsPerComponent" => 8,
+        };
+        image_dict.set("ColorSpace", "DeviceRGB");
+        let mut image_stream = Stream::new(image_dict, text.clone());
+        image_stream.compress().unwrap();
+        let image_id = doc.add_object(image_stream);
+
+        // Self-contained form: own /Resources, content draws the image in
+        // form space. The form's BBox is the page rect and the page draws
+        // the form at the identity transform, so the form content's `cm`
+        // maps image units straight onto page points — the page must *not*
+        // add its own 612×792 `cm` (that would multiply the form's `cm`
+        // onto itself, the exact double-`cm` trap the MRC rewrite avoids).
+        let form_content = Content {
+            operations: vec![
+                Operation::new("q", vec![]),
+                Operation::new(
+                    "cm",
+                    vec![
+                        600.into(),
+                        0.into(),
+                        0.into(),
+                        450.into(),
+                        6.into(),
+                        170.into(),
+                    ],
+                ),
+                Operation::new("Do", vec![Object::Name(b"Im0".to_vec())]),
+                Operation::new("Q", vec![]),
+            ],
+        }
+        .encode()
+        .unwrap();
+        let form_id = doc.add_object(Object::Stream(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                "Resources" => dictionary! { "XObject" => dictionary! { "Im0" => image_id } },
+            },
+            form_content,
+        )));
+
+        // Page draws the form at the identity transform.
+        let page_content = Content {
+            operations: vec![
+                Operation::new("q", vec![]),
+                Operation::new("Do", vec![Object::Name(b"Fm0".to_vec())]),
+                Operation::new("Q", vec![]),
+            ],
+        }
+        .encode()
+        .unwrap();
+        let page_content_id =
+            doc.add_object(Object::Stream(Stream::new(dictionary! {}, page_content)));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => page_content_id,
+            "Resources" => dictionary! { "XObject" => dictionary! { "Fm0" => form_id } },
+        });
+        push_kid(&mut doc, pages_id, page_id);
+        compress_images_opt(
+            &mut doc,
+            QualityMode::fixed(QUALITY),
+            false,
+            &CpuTranscoder::default(),
+            CompressOptions {
+                mrc,
+                ..CompressOptions::default()
+            },
+        );
+        save_pdf(&mut doc, dir.join(name).to_str().unwrap()).unwrap();
+    };
+
+    build(&dir, "form-pre.pdf", false);
+    build(&dir, "form-post.pdf", true);
+    let loaded = assert_well_formed(&dir.join("form-post.pdf"));
+
+    // The form (a stream) must now own the foreground: its /Resources gains
+    // FgMrc0 pointing at an image with an /SMask, and its content draws it.
+    let mut form = None;
+    for obj in loaded.objects.values() {
+        if let Object::Stream(s) = obj
+            && s.dict.get(b"Subtype").ok().and_then(|t| t.as_name().ok())
+                == Some(b"Form".as_slice())
+        {
+            form = Some(s);
+        }
+    }
+    let form = form.expect("the output must still contain the Form XObject");
+    let xobjects = form
+        .dict
+        .get(b"Resources")
+        .ok()
+        .and_then(|r| r.as_dict().ok())
+        .and_then(|r| r.get(b"XObject").ok())
+        .and_then(|x| x.as_dict().ok());
+    let xobjects = xobjects.expect("the form's resources must declare XObjects");
+    let fg_ref = xobjects
+        .get(b"FgMrc0")
+        .expect("the foreground must be registered in the *form's* resources")
+        .as_reference()
+        .ok();
+    let fg_ref = fg_ref.expect("FgMrc0 must be an indirect reference");
+    let Object::Stream(fg) = loaded.objects.get(&fg_ref).unwrap() else {
+        panic!("FgMrc0 must be a stream");
+    };
+    assert!(
+        fg.dict.get(b"SMask").is_ok(),
+        "the registered foreground must be the masked ink layer"
+    );
+    let form_content = form
+        .decompressed_content()
+        .expect("the form content must stay parseable");
+    assert!(
+        form_content.windows(6).any(|w| w == b"FgMrc0"),
+        "the form content must draw the foreground layer"
+    );
+
+    // And the composite must render with the ink in exactly the source's
+    // location (the whole point of registering it in the form's resources).
+    assert!(
+        render_first_page_at(&dir.join("form-pre.pdf"), &dir.join("form-pre"), "300"),
+        "pdftoppm failed on form-pre.pdf"
+    );
+    assert!(
+        render_first_page_at(&dir.join("form-post.pdf"), &dir.join("form-post"), "300"),
+        "pdftoppm failed on form-post.pdf"
+    );
+    let pre = image::open(dir.join("form-pre.png")).unwrap().to_luma8();
+    let post = image::open(dir.join("form-post.png")).unwrap().to_luma8();
+    let ink_of = |img: &GrayImage| -> u64 { img.pixels().filter(|p| p[0] < 128).count() as u64 };
+    assert!(ink_of(&pre) > 0, "the source render must contain ink");
+    let diff = ink_of(&post) as i64 - ink_of(&pre) as i64;
+    let ratio = ink_of(&post) as f64 / ink_of(&pre) as f64;
+    assert!(
+        (0.90..=1.10).contains(&ratio),
+        "the form-composited ink must match the source ink coverage \
+         ({diff:+} px, ratio {ratio:.3})"
+    );
+}
+
+/// `--jpeg2000`: the JPXDecode candidate (a minimal JP2 file) must decode in
+/// poppler and mutool and stay visually equivalent to the source.
+#[test]
+#[cfg(feature = "optimize")]
+fn jpeg2000_candidate_decodes_and_renders() {
+    let dir = test_dir();
+    if !ensure_tool("pdftoppm", pdftoppm_available()) {
+        return;
+    }
+    let (w, h) = (512u32, 384u32);
+    let pixels = photoish_rgb(w, h);
+
+    let build = |dir: &Path, name: &str, jpeg2000: bool| {
+        let (mut doc, pages_id) = new_doc();
+        let mut image_dict = dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Image",
+            "Width" => w as i64,
+            "Height" => h as i64,
+            "BitsPerComponent" => 8,
+        };
+        image_dict.set("ColorSpace", "DeviceRGB");
+        let mut image_stream = Stream::new(image_dict, pixels.clone());
+        image_stream.compress().unwrap();
+        let image_id = doc.add_object(image_stream);
+        let content = Content {
+            operations: vec![
+                Operation::new("q", vec![]),
+                Operation::new(
+                    "cm",
+                    vec![
+                        w.into(),
+                        0.into(),
+                        0.into(),
+                        h.into(),
+                        50.into(),
+                        100.into(),
+                    ],
+                ),
+                Operation::new("Do", vec![Object::Name(b"Im0".to_vec())]),
+                Operation::new("Q", vec![]),
+            ],
+        };
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+            "Resources" => dictionary! { "XObject" => dictionary! { "Im0" => image_id } },
+        });
+        push_kid(&mut doc, pages_id, page_id);
+        compress_images_opt(
+            &mut doc,
+            QualityMode::fixed(QUALITY),
+            false,
+            &CpuTranscoder::default(),
+            CompressOptions {
+                jpeg2000,
+                ..CompressOptions::default()
+            },
+        );
+        save_pdf(&mut doc, dir.join(name).to_str().unwrap()).unwrap();
+    };
+
+    build(&dir, "j2k-pre.pdf", false);
+    build(&dir, "j2k-post.pdf", true);
+
+    let loaded = Document::load(dir.join("j2k-post.pdf")).unwrap();
+    let images = find_image_streams(&loaded);
+    assert!(
+        images.iter().any(|(_, _, d)| {
+            d.get(b"Filter").and_then(|f| f.as_name()).ok() == Some(b"JPXDecode".as_slice())
+        }),
+        "the photo must be re-encoded as JPXDecode"
+    );
+    let (_, _, dict) = images
+        .iter()
+        .find(|(_, _, d)| {
+            d.get(b"Filter").and_then(|f| f.as_name()).ok() == Some(b"JPXDecode".as_slice())
+        })
+        .unwrap();
+    // The JP2 wrapper carries sRGB; the dict keeps /DeviceRGB and drops
+    // /BitsPerComponent (bit depth lives in the codestream).
+    assert_eq!(
+        dict.get(b"ColorSpace").and_then(|c| c.as_name()).ok(),
+        Some(b"DeviceRGB".as_slice())
+    );
+    assert!(dict.get(b"BitsPerComponent").is_err());
+
+    // qpdf: structure must be clean (gs's JPX decoder is known-broken on all
+    // JP2 files, so the well-formed gate uses qpdf + poppler/mutool here).
+    if ensure_tool("qpdf", qpdf_available()) {
+        let output = Command::new("qpdf")
+            .args(["--check"])
+            .arg(dir.join("j2k-post.pdf"))
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            output.status.success() && !text.contains("ERROR"),
+            "qpdf rejected the JPXDecode output:\n{text}"
+        );
+    }
+
+    // poppler must decode the JP2 (it errors loudly on a raw codestream).
+    let (pre, post) = (dir.join("j2k-pre"), dir.join("j2k-post"));
+    assert!(
+        render_first_page(&dir.join("j2k-pre.pdf"), &pre),
+        "pdftoppm failed on j2k-pre.pdf"
+    );
+    assert!(
+        render_first_page(&dir.join("j2k-post.pdf"), &post),
+        "pdftoppm failed on j2k-post.pdf"
+    );
+    let a = image::open(pre.with_extension("png")).unwrap().to_luma8();
+    let b = image::open(post.with_extension("png")).unwrap().to_luma8();
+    let score = ssim(&a, &b);
+    assert!(
+        score >= 0.98,
+        "JPEG2000 re-encode must stay visually equivalent (SSIM {score:.4})"
+    );
+
+    // mutool is the second independent JPX oracle.
+    if let Ok(output) = Command::new("mutool")
+        .args([
+            "draw",
+            "-o",
+            dir.join("j2k-mutool-%d.png").to_str().unwrap(),
+            "-r",
+            "36",
+        ])
+        .arg(dir.join("j2k-post.pdf"))
+        .output()
+    {
+        let text = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "mutool must decode the JP2: {text}"
+        );
+    }
+}
+
+/// `--jpeg2000` runtime fidelity admission at the pipeline level: the gate
+/// is measured on the decoded candidate itself (see `CandidateEvidence`),
+/// not assumed from the 85%-of-JPEG rate target. The clean photo
+/// reconstructs above the SSIM gate and is admitted as JPXDecode; the
+/// heavy-noise photo at the same rate target degrades below the gate and
+/// must NOT be admitted — the JPEG candidate wins instead, so byte
+/// savings alone are never sufficient for admission.
+#[test]
+#[cfg(feature = "optimize")]
+fn jpeg2000_runtime_gate_admits_clean_and_rejects_degraded() {
+    let dir = test_dir();
+    let (w, h) = (512u32, 384u32);
+    let heavy = {
+        let mut next = xorshift(42);
+        let mut v = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let (r, g, b) = (
+                    (x as f32 / w as f32 * 255.0) as u8,
+                    (y as f32 / h as f32 * 255.0) as u8,
+                    (128.0 + 80.0 * ((x as f32 + y as f32) / 32.0).sin()) as u8,
+                );
+                let n = (next() & 0x7f) as u8;
+                v.extend_from_slice(&[r.wrapping_add(n), g.wrapping_add(n), b.wrapping_add(n)]);
+            }
+        }
+        v
+    };
+
+    let build = |dir: &Path, name: &str, pixels: Vec<u8>| {
+        let (mut doc, pages_id) = new_doc();
+        let mut image_dict = dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Image",
+            "Width" => w as i64,
+            "Height" => h as i64,
+            "BitsPerComponent" => 8,
+        };
+        image_dict.set("ColorSpace", "DeviceRGB");
+        let mut image_stream = Stream::new(image_dict, pixels);
+        image_stream.compress().unwrap();
+        let image_id = doc.add_object(image_stream);
+        let content = Content {
+            operations: vec![
+                Operation::new("q", vec![]),
+                Operation::new(
+                    "cm",
+                    vec![
+                        w.into(),
+                        0.into(),
+                        0.into(),
+                        h.into(),
+                        50.into(),
+                        100.into(),
+                    ],
+                ),
+                Operation::new("Do", vec![Object::Name(b"Im0".to_vec())]),
+                Operation::new("Q", vec![]),
+            ],
+        };
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content_id,
+            "Resources" => dictionary! { "XObject" => dictionary! { "Im0" => image_id } },
+        });
+        push_kid(&mut doc, pages_id, page_id);
+        compress_images_opt(
+            &mut doc,
+            QualityMode::fixed(QUALITY),
+            false,
+            &CpuTranscoder::default(),
+            CompressOptions {
+                jpeg2000: true,
+                ..CompressOptions::default()
+            },
+        );
+        save_pdf(&mut doc, dir.join(name).to_str().unwrap()).unwrap();
+    };
+
+    build(&dir, "j2k-clean.pdf", photoish_rgb(w, h));
+    build(&dir, "j2k-noisy.pdf", heavy);
+
+    let clean = Document::load(dir.join("j2k-clean.pdf")).unwrap();
+    assert!(
+        find_image_streams(&clean).iter().any(|(_, _, d)| {
+            d.get(b"Filter").and_then(|f| f.as_name()).ok() == Some(b"JPXDecode".as_slice())
+        }),
+        "the clean photo must be admitted as JPXDecode"
+    );
+    let noisy = Document::load(dir.join("j2k-noisy.pdf")).unwrap();
+    assert!(
+        !find_image_streams(&noisy).iter().any(|(_, _, d)| {
+            d.get(b"Filter").and_then(|f| f.as_name()).ok() == Some(b"JPXDecode".as_slice())
+        }),
+        "the heavy-noise photo must be rejected by the runtime fidelity gate"
+    );
+}
+
+/// `--font-subset`: an embedded TrueType font is subset to the used glyphs,
+/// the content is rewritten to CID codes, and the page renders
+/// pixel-identically with text extraction intact.
+#[test]
+#[cfg(feature = "optimize")]
+fn font_subset_keeps_text_and_renders_identically() {
+    use presse::pdf::optimize::subset_fonts;
+
+    let candidates = [
+        "/usr/share/fonts/TTF/DejaVuSerifCondensed.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+        "/usr/share/fonts/liberation/LiberationSerif-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+    ];
+    let Some(ttf_path) = candidates.iter().find(|p| Path::new(p).exists()) else {
+        eprintln!("note: no TrueType font found — skipping the font-subset gate");
+        return;
+    };
+    let ttf = std::fs::read(ttf_path).unwrap();
+    let dir = test_dir();
+
+    let build = |dir: &Path, name: &str, subset: bool| {
+        let (mut doc, pages_id) = new_doc();
+        let mut ff = Stream::new(dictionary! {"Length1" => ttf.len() as i64}, ttf.clone());
+        ff.dict.set("Length", ff.content.len() as i64);
+        let ff_id = doc.add_object(Object::Stream(ff));
+        let desc_id = doc.add_object(Object::Dictionary(dictionary! {
+            "Type" => "FontDescriptor",
+            "FontName" => "TestFont",
+            "Flags" => 4,
+            "FontBBox" => vec![
+                Object::Integer(-100),
+                Object::Integer(-200),
+                Object::Integer(1200),
+                Object::Integer(900),
+            ],
+            "ItalicAngle" => 0,
+            "Ascent" => 900,
+            "Descent" => -200,
+            "CapHeight" => 700,
+            "StemV" => 80,
+            "MissingWidth" => 600,
+            "FontFile2" => ff_id,
+        }));
+        let widths: Vec<Object> = (32..=122).map(|_| 600.0.into()).collect();
+        let font_id = doc.add_object(Object::Dictionary(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "TrueType",
+            "BaseFont" => "TestFont",
+            "FirstChar" => 32,
+            "LastChar" => 122,
+            "Widths" => widths,
+            "Encoding" => "WinAnsiEncoding",
+            "FontDescriptor" => desc_id,
+        }));
+
+        for (i, shown) in [
+            b"Hello World!".as_slice(),
+            b"abcdefghijklmnopqrstuvwxyz".as_slice(),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let content = Content {
+                operations: vec![
+                    Operation::new("BT", vec![]),
+                    Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), 24.0.into()]),
+                    Operation::new("Td", vec![50.0.into(), (700.0 - 120.0 * i as f64).into()]),
+                    Operation::new(
+                        "Tj",
+                        vec![Object::String(shown.to_vec(), lopdf::StringFormat::Literal)],
+                    ),
+                    Operation::new("ET", vec![]),
+                ],
+            };
+            let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+            let page_id = doc.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                "Contents" => content_id,
+                "Resources" => dictionary! { "Font" => dictionary! { "F1" => font_id } },
+            });
+            push_kid(&mut doc, pages_id, page_id);
+        }
+        if subset {
+            let n = subset_fonts(&mut doc);
+            assert_eq!(n, 1, "exactly the one embedded font must be subset");
+        }
+        compress_and_save_pdf(&mut doc, dir.join(name).to_str().unwrap(), false).unwrap();
+    };
+
+    build(&dir, "font-pre.pdf", false);
+    build(&dir, "font-post.pdf", true);
+
+    // The font program must be dramatically smaller (subset) and the font
+    // must now be a Type0/CIDFontType2 with identity CIDToGIDMap.
+    let loaded = assert_well_formed(&dir.join("font-post.pdf"));
+    let mut subset_program: Option<usize> = None;
+    for obj in loaded.objects.values() {
+        if let Object::Dictionary(d) = obj
+            && let Ok(Object::Reference(ff)) = d.get(b"FontFile2")
+            && let Some(Object::Stream(s)) = loaded.objects.get(ff)
+        {
+            subset_program = Some(s.content.len());
+        }
+    }
+    let subset_program = subset_program.expect("the subset font program must exist");
+    assert!(
+        subset_program < ttf.len() / 2,
+        "the subset must be far smaller than the original program: {} vs {}",
+        subset_program,
+        ttf.len()
+    );
+    let has_cid = loaded.objects.values().any(|obj| match obj {
+        Object::Dictionary(d) => {
+            d.get(b"Subtype").and_then(|s| s.as_name()).ok() == Some(b"CIDFontType2".as_slice())
+        }
+        _ => false,
+    });
+    assert!(has_cid, "the font must be rewritten as a CIDFontType2");
+
+    // Render before/after pixel-identically and extract the text.
+    if ensure_tool("pdftoppm", pdftoppm_available()) {
+        let (pre, post) = (dir.join("font-pre"), dir.join("font-post"));
+        assert!(render_first_page(&dir.join("font-pre.pdf"), &pre));
+        assert!(render_first_page(&dir.join("font-post.pdf"), &post));
+        let a = image::open(pre.with_extension("png")).unwrap().to_luma8();
+        let b = image::open(post.with_extension("png")).unwrap().to_luma8();
+        assert_eq!(a.dimensions(), b.dimensions());
+        let diff = a
+            .pixels()
+            .zip(b.pixels())
+            .filter(|(x, y)| x[0] != y[0])
+            .count();
+        assert_eq!(
+            diff, 0,
+            "the subset font must render pixel-identically ({diff} px differ)"
+        );
+    }
+    if let Ok(output) = Command::new("pdftotext")
+        .arg(dir.join("font-post.pdf"))
+        .arg("-")
+        .output()
+        && output.status.success()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            text.contains("Hello World!"),
+            "the rebuilt ToUnicode must keep text extraction: {text:?}"
+        );
+        assert!(
+            text.contains("abcdefghijklmnopqrstuvwxyz"),
+            "the rebuilt ToUnicode must keep text extraction: {text:?}"
+        );
+    }
 }
