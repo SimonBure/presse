@@ -1210,8 +1210,8 @@ fn reencode_image_stream<T: ImageTranscoder>(
                 // implementation of the generic runtime admission court.
                 // A candidate that fails to decode, is dimensionally
                 // unfaithful, or reconstructs below the SSIM gate never
-                // reaches the size competition, so `smallest` can never
-                // trade readability for bytes.
+                // reaches the size competition, so byte savings alone are
+                // never sufficient for admission.
                 if jpeg2000
                     && tag == 3
                     && let Some(j) = jpeg_len

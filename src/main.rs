@@ -175,9 +175,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 // `--font-subset` (optimize feature): subset embedded
-                // TrueType/CFF fonts to the glyphs the content actually
-                // uses; every font is skipped unless the used-glyph mapping
-                // resolves exactly and the subset is strictly smaller.
+                // TrueType fonts to the glyphs the content actually uses;
+                // CFF (FontFile3) programs are skipped, and every font is
+                // left untouched unless the used-glyph mapping resolves
+                // exactly and the subset is strictly smaller.
                 if font_subset {
                     let n = pdf::optimize::subset_fonts(&mut doc);
                     verbose!(verbose, "[fonts] subset {n} font(s)");

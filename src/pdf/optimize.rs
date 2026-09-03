@@ -159,17 +159,18 @@ pub fn subset_fonts(_doc: &mut Document) -> usize {
     0
 }
 
-/// Subset every embedded TrueType/CFF simple font to the glyphs the content
-/// streams actually show (`--font-subset`), via typst's `subsetter`. Returns
-/// the number of fonts subset.
+/// Subset every embedded TrueType (FontFile2) font to the glyphs the content
+/// streams actually show (`--font-subset`), via typst's `subsetter`. CFF
+/// (FontFile3) programs are deliberately skipped — see the installer note.
+/// Returns the number of fonts subset.
 ///
 /// # Design rationale
 ///
 /// The pass is deliberately conservative — a font is left untouched unless
 /// *every* condition holds:
 ///
-/// - the font is a simple (non-CID, non-Type3) TrueType or CFF font with an
-///   embedded program (`FontFile2` / `FontFile3` `Type1C`);
+/// - the font is a simple (non-CID, non-Type3) TrueType font with an
+///   embedded `FontFile2` program (CFF `FontFile3` programs are skipped);
 /// - every content stream that shows text with it parsed cleanly, every text
 ///   op was attributable to a `Tf`, and the font is not used from any
 ///   unparseable or non-scanned context (unattributable usage blocks the

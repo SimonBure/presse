@@ -292,8 +292,9 @@ compose; `--compression` presets expand to them:
   target is only a sizing hint: every candidate is decoded back and
   measured against the source pixels on the native 512-px window
   (`CandidateEvidence` — SSIM plus luma/chroma/edge error), and admitted
-  to the size court only above a 0.98 native-SSIM gate, so `smallest`
-  can never trade readability for bytes. On the 18 MB image-heavy corpus
+  to the size court only above a 0.98 native-SSIM gate, so byte savings
+  alone are never sufficient for admission. On the 18 MB image-heavy
+  corpus
   the photo pages re-encode at a mean luma difference of ~1.3 levels.
   Ghostscript's JPX decoder is broken on *all* JP2 files (including
   OpenJPEG's own), so the regression oracle is poppler + mutool +

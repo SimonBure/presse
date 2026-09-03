@@ -3645,8 +3645,8 @@ fn jpeg2000_candidate_decodes_and_renders() {
 /// not assumed from the 85%-of-JPEG rate target. The clean photo
 /// reconstructs above the SSIM gate and is admitted as JPXDecode; the
 /// heavy-noise photo at the same rate target degrades below the gate and
-/// must NOT be admitted — the JPEG candidate wins instead, so `smallest`
-/// can never trade readability for bytes.
+/// must NOT be admitted — the JPEG candidate wins instead, so byte
+/// savings alone are never sufficient for admission.
 #[test]
 #[cfg(feature = "optimize")]
 fn jpeg2000_runtime_gate_admits_clean_and_rejects_degraded() {
