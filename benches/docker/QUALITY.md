@@ -406,3 +406,123 @@ driven entirely by that tail; 340 s excluding the killed file).
 still running when re-measured under a 600 s cap) and `specs_pdf32000.pdf`
 (210 s); excluding the killed file the total is 340 s. The plain `-z`
 repack is 0.1–0.6 s on the same files.
+
+## The `optimize` feature: codec candidates, fonts and structural passes
+
+The `optimize` Cargo feature (`cargo build --release --features optimize`)
+enables the default-off heavy passes behind `--compression
+{fast,balanced,small,smallest}` and the individual flags `--dedup`,
+`--zopfli`, `--font-subset`, `--jbig2`, `--jpeg2000`, `--mrc`. Each is a
+*candidate* in the same size court as the image pipeline, or a
+strictly-smaller-gated structural rewrite, and every one is validated by
+per-image fidelity gates (palette ≥0.9999 native SSIM; the bitonal masks —
+G4/JBIG2/MRC — on the classifier's measured reconstruction-error gate;
+JPEG2000 on a runtime decode-back gate — the candidate is decoded and
+measured against the source pixels on the native 512-px window and
+admitted to the size court only above 0.98 SSIM, so the 85%-of-JPEG rate
+target is a sizing hint rather than a quality assumption)
+plus the regression suite (qpdf/poppler/mutool/gs gates, pixel-identical
+rendering checks, text-extraction checks, and the same brutal
+"colored rectangle underneath + non-black current color" trap that
+`--raster-classify` already passes).
+
+Measured on the synthetic corpus (`/tmp/presse_smoke/corpus`,
+deterministic, best-of-1, `-q 50`, current tree; the Pareto sweep in
+`benches/docker/pareto.py --optimize` reproduces every cell):
+
+| corpus file | default (`fast`) | `--mrc` | `--jbig2` | `--compression smallest` |
+|---|---|---|---|---|
+| scanned.pdf (3.40 MB, 3 grainy gray pages) | 0.27 MB | 2.3 KB | 1.3 KB | 1.1 KB |
+| image-heavy.pdf (17.98 MB, 60 photos, 24 pages) | 1.51 MB | — | — | 1.38 MB |
+
+Where the candidates land on the Pareto matrix (300 dpi render SSIM vs
+the source, `pareto.py --optimize`, same corpus):
+
+- **scanned.pdf — `--mrc` wins the ≥0.999 frontier outright.** The flat
+  two-tone composite is 2.3 KB at render SSIM 0.9997, against qpdf q50
+  0.36 MB / mutool 0.29 MB / presse q50 0.27 MB at the same or lower
+  fidelity, and gs `/screen` 0.48 MB. At ≥0.9999 every full-res tool sits
+  at ~0.56–0.66 MB (presse q75 0.60 MB, qpdf 0.66 MB, mutool 0.56 MB) —
+  the grain-preserving JPEG path, where the flat composite cannot enter
+  because replacing the paper texture costs render fidelity; the
+  ≤0.98 frontier belongs to the bitonal masks (`--jbig2` 1.3 KB and
+  `smallest` 1.1 KB, both at SSIM 0.981 — the texture is gone, which is
+  what "flat" means). On this synthetic grainy-scan fixture, flat MRC
+  reaches 2.3 KB at 0.9997 300-dpi render SSIM — roughly two orders of
+  magnitude smaller than the measured full-raster alternatives at
+  comparable render fidelity. That is a *render-fidelity* claim: the
+  underlying image information is not equivalent (the 0.9999 court
+  exposes the missing native paper texture), which is exactly the region
+  commercial MRC engines aim at — and the residual their texture-aware
+  variants attack.
+- **image-heavy.pdf — the codec candidates are honest, not Pareto-new.**
+  `--jpeg2000` wins the per-image size court on the photos (1.38 MB vs
+  1.51 MB at q50) but at render SSIM 0.9931 vs 0.9995 — the runtime
+  gate's per-image ≥0.98 native-window admission is met, yet the
+  document-level point is inside the frontier, dominated by the ssim
+  mode (`d0-s0.86`: 0.28 MB at 0.9967). At ≥0.9999 the frontier is
+  unchanged (presse q75 2.53 MB vs qpdf 1.71 MB, mutool 2.40 MB — the
+  J2K candidate never qualifies there because its admitted reconstructions
+  sit below the gate on this corpus). This is the expected shape for a
+  rate-targeted lossy candidate; nothing claims otherwise.
+- `--dedup` / `--zopfli` / `--font-subset` on these three files are
+  structural no-ops or near-no-ops (photos have no duplicate streams,
+  `smallest` still pays their CPU: 1.46 s vs 0.03 s at q50) — their wins
+  are on duplicate-heavy corpora, where the existing `photos60` Pareto
+  row (6.46 MB, dedup) already shows the effect.
+
+Readings and honest caveats:
+
+- The **scanned** row shows the three bitonal regimes: `fast` pays
+  photographic cost for document content (0.26 MB), `--mrc` builds the
+  **flat two-tone** composite — solid paper color (a 1×1 fill, median of
+  the classified paper) + solid ink color + full-resolution lossless G4
+  mask (2.3 KB, mean luma diff 1.6 vs the source at 30 dpi — the earlier
+  downsampled-JPEG background was dropped because near-flat JPEG
+  bitstreams are mis-decoded as full-page gradients by poppler and
+  Ghostscript), and `--jbig2` / `smallest` collapse the page to a flat
+  1-bit mask (~1 KB, pixel-identical to the equivalent
+  `--raster-classify` G4 output — the grain is gone, as with any bitonal
+  representation). Note what "flat" means here: the median paper color
+  *replaces* the paper texture, so flat MRC sits at the bottom of the
+  candidate ladder (`source scan 3.40 MB → JPEG ~260 KB → textured MRC —
+  compressed background + foreground + mask, the ABBYY-style mechanism,
+  future work → flat MRC 2.3 KB → JBIG2 1.3 KB`) and the fidelity court
+  decides where a document belongs. The size court picks the smallest per
+  image, so on real scans the winner depends on how much paper texture is
+  worth keeping.
+- **`--jpeg2000`** re-encodes the 60-photo corpus to ~2.6 MB (the same
+  order as `--jpeg2000` alone: 2.59 MB) at a mean luma difference of
+  ~1.3 levels vs the source on sampled pages — visually equivalent, but
+  the JPEG candidate wins or ties on most photos, so the flag mainly pays
+  off where J2K's rate-distortion genuinely beats JPEG. The codestream is
+  wrapped in a minimal JP2 file (signature/file-type/image-header+sRGB/
+  codestream boxes): poppler decodes that cleanly where a raw codestream
+  only renders after noisy fallback. Ghostscript's JPX decoder is broken
+  on *all* JP2 files (reproduces with OpenJPEG's own output), so the
+  regression oracle for JPX is poppler + mutool + OpenJPEG.
+- **`--font-subset`** on a font-heavy document (194 KB with a full
+  TrueType program) reaches ~7 KB with pixel-identical rendering and
+  intact text extraction (rebuilt `/ToUnicode`, CID-font rewrite). The
+  pass is deliberately conservative and TrueType-only: fonts whose
+  used-glyph mapping cannot be resolved exactly (unusual encodings,
+  resource-less forms, unparseable streams) and CFF (`FontFile3`)
+  programs are skipped rather than risk a glyph change.
+- **`--dedup` / `--zopfli`** are structural passes with no fidelity
+  surface: identical-stream coalescing and a strictly-smaller Zopfli
+  re-encode, both verified byte-equivalent on the decoded content.
+- **Poppler notes discovered while oracling these codecs**: its JBIG2
+  decoder emits *inverted* samples (so JBIG2 images use the identity
+  `/Decode`, the opposite of G4's `[1 0]`), its JBIG2 parser warns
+  "extraneous byte after segment" on the encoder's spec-mandated A.3.6
+  flush marker (non-fatal, output correct), and its Splash soft-mask path
+  overflowed its `int`-based mask allocation ("Bogus memory allocation
+  size") whenever the MRC content rewrite re-applied the placement `cm`
+  for the foreground — squaring the scale (1600×1200 became
+  2,560,000×1,440,000). The rewrite now draws the foreground at the
+  already-current transform, and Ghostscript additionally requires the
+  soft mask to be a typed `/Subtype /Image` XObject or it silently drops
+  it; both are fixed and rendered pixel-identically across
+  poppler/mutool/gs. These are renderer quirks, not presse defects — each
+  is documented next to the code that works around it.
+

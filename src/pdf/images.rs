@@ -45,6 +45,17 @@
 //!    offered only to `FlatColor` content under this flag, so it can never
 //!    turn a photo into a palette. The smallest of original / JPEG /
 //!    indexed / mask wins per image.
+//! 8. **Runtime fidelity admission** (`--jpeg2000`) — every lossy candidate
+//!    is decoded back and measured against the source pixels on the native
+//!    512-px window (`CandidateEvidence`) *before* the size court may rank
+//!    it. JPEG2000 is the first implementation: the 85% rate target is only
+//!    a sizing hint; a candidate that fails to decode, is dimensionally
+//!    unfaithful, or reconstructs below `J2K_SSIM_GATE` never enters the
+//!    size competition. Palette has its own native-SSIM gate
+//!    (`PALETTE_SSIM_GATE`); the bitonal candidates are gated by the
+//!    classifier's measured reconstruction error. `CandidateEvidence` is
+//!    the template every future lossy representation (Jpegli, MRC, …)
+//!    fills.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -169,8 +180,9 @@ pub fn compress_images(doc: &mut Document, quality: u8, verbose: bool) {
     );
 }
 
-/// Options for the image candidate pipeline (`--palette`, `--raster-classify`).
-/// [`Default`] is the JPEG-only pipeline.
+/// Options for the image candidate pipeline (`--palette`, `--raster-classify`
+/// and the `optimize`-feature codec candidates `--jbig2`, `--jpeg2000`,
+/// `--mrc`). [`Default`] is the JPEG-only pipeline.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CompressOptions {
     /// `-d/--dpi`: cap placed images to this resolution.
@@ -180,6 +192,15 @@ pub struct CompressOptions {
     /// `--raster-classify`: route bitonal text to 1-bit G4, flat colors to
     /// indexed.
     pub classify: bool,
+    /// `--jbig2`: also offer a lossless JBIG2 encoding of bitonal masks
+    /// (`optimize` feature).
+    pub jbig2: bool,
+    /// `--jpeg2000`: also offer a JPXDecode re-encode of continuous-tone
+    /// images (`optimize` feature).
+    pub jpeg2000: bool,
+    /// `--mrc`: also offer a mixed-raster composite of classified bitonal
+    /// scans (`optimize` feature).
+    pub mrc: bool,
 }
 
 /// Replace JPEG images in a document using the given transcoding backend.
@@ -205,6 +226,7 @@ pub fn compress_images_with<T: ImageTranscoder>(
             dpi,
             palette,
             classify,
+            ..CompressOptions::default()
         },
     );
 }
@@ -220,8 +242,9 @@ pub fn compress_images_with<T: ImageTranscoder>(
 /// images and keeps the smallest of original / JPEG / indexed. `classify`
 /// (`--raster-classify`) runs the raster classifier first: bitonal content
 /// additionally gets a 1-bit CCITT G4 opaque grayscale candidate, and
-/// flat-color content gets the indexed candidate. The pipeline is split in
-/// three phases:
+/// flat-color content gets the indexed candidate. The `optimize`-feature
+/// options add the JBIG2 / JPEG2000 / MRC candidates. The pipeline is split
+/// in three phases:
 /// 1. **Extract** — detach every eligible image stream from the `Document`
 ///    object tree (serial, cheap: just map lookups + moves, no copies).
 /// 2. **Re-encode** — transcode all streams concurrently with rayon on owned,
@@ -230,8 +253,8 @@ pub fn compress_images_with<T: ImageTranscoder>(
 /// 3. **Apply** — write the re-encoded streams (and updated `/Filter` +
 ///    `/Length`, plus `/Width` + `/Height` for downsampled images, and
 ///    `/ColorSpace` + palette objects for indexed candidates, and the
-///    `/ColorSpace`/`Decode` entries for mask candidates) back into the
-///    object tree in a
+///    `/ColorSpace`/`Decode` entries for mask candidates, and the MRC layer
+///    objects + content-stream rewrite) back into the object tree in a
 ///    single serial pass, right before serialization. The pass ends by
 ///    coalescing byte-identical image objects.
 pub fn compress_images_opt<T: ImageTranscoder>(
@@ -245,6 +268,9 @@ pub fn compress_images_opt<T: ImageTranscoder>(
         dpi,
         palette,
         classify,
+        jbig2,
+        jpeg2000,
+        mrc,
     } = opts;
     // Placement scan is needed only when downsampling is requested; without
     // it (the default) the pipeline is byte-identical to before.
@@ -252,6 +278,16 @@ pub fn compress_images_opt<T: ImageTranscoder>(
     let downsample = dpi
         .zip(placements.as_ref())
         .map(|(d, placements)| Downsample { dpi: d, placements });
+    // MRC needs the content-site scan (where each image is drawn, with the
+    // full CTM) and the set of images whose content streams cannot be
+    // parsed; computed before phase 1 detaches the image objects.
+    #[cfg(feature = "optimize")]
+    let mrc_index = mrc.then(|| {
+        let (sites, blocked) = crate::pdf::optimize::mrc_sites(doc);
+        crate::pdf::optimize::MrcIndex { sites, blocked }
+    });
+    #[cfg(not(feature = "optimize"))]
+    let _mrc_index: Option<()> = None;
     // Phase 1 — extract.
     let image_ids: Vec<ObjectId> = doc
         .objects
@@ -293,8 +329,13 @@ pub fn compress_images_opt<T: ImageTranscoder>(
                 CompressOptions {
                     palette,
                     classify,
+                    jbig2,
+                    jpeg2000,
+                    mrc,
                     ..CompressOptions::default()
                 },
+                #[cfg(feature = "optimize")]
+                mrc_index.as_ref(),
             );
             (id, outcome)
         })
@@ -349,6 +390,105 @@ pub fn compress_images_opt<T: ImageTranscoder>(
                     .set(b"Decode", Object::Array(vec![1.into(), 0.into()]));
                 stream
             }
+            // JBIG2 masks carry the same opaque 1-bit semantics as the G4
+            // ones, but with the *default* `/Decode [0 1]`: poppler's JBIG2
+            // decoder inverts its samples (1 = white, 0 = black), the
+            // opposite of CCITT and the JBIG2 spec, so the identity decode
+            // is what maps the ink bit to black across poppler, ghostscript
+            // and mutool alike. Phase 3 adds /JBIG2Globals when the encoder
+            // emitted a symbol dictionary.
+            #[cfg(feature = "optimize")]
+            Reencoded::Jbig2 { mut stream, global } => {
+                if let Some(g) = global {
+                    let mut gs = Stream::new(dictionary! {}, g);
+                    gs.dict
+                        .set(b"Length", Object::Integer(gs.content.len() as i64));
+                    let gid = doc.add_object(Object::Stream(gs));
+                    stream.dict.set(b"JBIG2Globals", Object::Reference(gid));
+                }
+                stream
+            }
+            // JPEG2000 streams are final from phase 2 (the JPXDecode
+            // codestream carries color space and bit depth).
+            #[cfg(feature = "optimize")]
+            Reencoded::Jpeg2000 { stream } => stream,
+            // MRC: build the layer objects (mask as the foreground's /SMask,
+            // solid ink-color foreground image) and rewrite the content
+            // streams that draw the image so the foreground is composited
+            // over the background. The background stream is inserted as the
+            // image itself. All of this is /SMask compositing under presse's
+            // control — the intended home for the mask machinery, unlike a
+            // stencil dropped in for an opaque raster.
+            #[cfg(feature = "optimize")]
+            Reencoded::Mrc {
+                stream: bg,
+                fg,
+                mask,
+                mask_codec,
+                mask_global,
+                mask_w,
+                mask_h,
+                sites,
+            } => {
+                let mut ms = Stream::new(dictionary! {}, mask);
+                // Type/Subtype are required by Ghostscript: a soft-mask
+                // stream without them is silently dropped (the whole
+                // foreground vanishes) — verified with the identical file
+                // with and without these two keys; poppler and mutool
+                // accept either form.
+                ms.dict.set(b"Type", Object::Name(b"XObject".to_vec()));
+                ms.dict.set(b"Subtype", Object::Name(b"Image".to_vec()));
+                ms.dict
+                    .set(b"ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+                ms.dict.set(b"BitsPerComponent", Object::Integer(1));
+                ms.dict.set(b"Width", Object::Integer(mask_w as i64));
+                ms.dict.set(b"Height", Object::Integer(mask_h as i64));
+                ms.dict.set(b"Filter", Object::Name(mask_codec.to_vec()));
+                // The mask is the foreground's /SMask: decoded 0 = fully
+                // transparent (paper), decoded 1 = fully opaque (ink). The
+                // ink bit is encoded 1 in both codecs, so the identity
+                // /Decode [0 1] is what maps ink → opaque.
+                ms.dict
+                    .set(b"Decode", Object::Array(vec![0.into(), 1.into()]));
+                if mask_codec == b"CCITTFaxDecode" {
+                    ms.dict.set(
+                        b"DecodeParms",
+                        Object::Dictionary(dictionary! {
+                            "K" => -1,
+                            "BlackIs1" => true,
+                            "Columns" => mask_w as i64,
+                            "Rows" => mask_h as i64,
+                        }),
+                    );
+                } else if let Some(g) = mask_global {
+                    let mut gs = Stream::new(dictionary! {}, g);
+                    gs.dict
+                        .set(b"Length", Object::Integer(gs.content.len() as i64));
+                    let gid = doc.add_object(Object::Stream(gs));
+                    ms.dict.set(b"JBIG2Globals", Object::Reference(gid));
+                }
+                let mask_id = doc.add_object(Object::Stream(ms));
+                // 1×1 solid foreground (median ink color), composited
+                // through the high-res mask by its /SMask. Drawn with the
+                // CTM captured at the draw site, the mask maps onto exactly
+                // the rectangle the source raster occupied.
+                let fg_stream = Stream::new(
+                    dictionary! {
+                        "Type" => "XObject",
+                        "Subtype" => "Image",
+                        "Width" => 1,
+                        "Height" => 1,
+                        "ColorSpace" => "DeviceRGB",
+                        "BitsPerComponent" => 8,
+                        "SMask" => mask_id,
+                        "Length" => 3,
+                    },
+                    fg.to_vec(),
+                );
+                let fg_id = doc.add_object(Object::Stream(fg_stream));
+                crate::pdf::optimize::apply_mrc_rewrites(doc, &sites, fg_id);
+                bg
+            }
         };
         doc.objects.insert(id, Object::Stream(stream));
     }
@@ -369,6 +509,16 @@ pub fn compress_images_opt<T: ImageTranscoder>(
 /// above this native-image SSIM on a 512-px window — the project's stricter
 /// witness, not the 64-px render scale.
 const PALETTE_SSIM_GATE: f64 = 0.9999;
+
+/// `--jpeg2000` admission gate: the decoded candidate must reconstruct to
+/// at least this native-window SSIM before the size court may rank it. The
+/// value matches the threshold the JPEG2000 render regression proves (0.98);
+/// it is deliberately looser than [`PALETTE_SSIM_GATE`] because exact
+/// palettes are lossless while J2K is rate-targeted lossy by design — the
+/// gate exists to catch the *degraded* reconstruction, not to demand
+/// losslessness.
+#[cfg(feature = "optimize")]
+const J2K_SSIM_GATE: f64 = 0.98;
 
 /// Above this many unique colors the raster is photographic; median-cut
 /// quantization costs more than a palette can ever save, so it is skipped.
@@ -399,6 +549,33 @@ enum Reencoded {
     /// `DeviceGray`, `/DecodeParms`, `/BitsPerComponent` — is already
     /// written by phase 2).
     Mask { stream: Stream },
+    /// The stream carries a 1-bit JBIG2 opaque grayscale payload (`--jbig2`);
+    /// phase 3 sets `/Decode` and, when a symbol dictionary was produced,
+    /// the `/JBIG2Globals` reference.
+    #[cfg(feature = "optimize")]
+    Jbig2 {
+        stream: Stream,
+        global: Option<Vec<u8>>,
+    },
+    /// The stream carries a JPEG2000 codestream (`--jpeg2000`); the
+    /// `/ColorSpace`/`/BitsPerComponent` entries are dropped because a
+    /// JPXDecode image carries them in the codestream.
+    #[cfg(feature = "optimize")]
+    Jpeg2000 { stream: Stream },
+    /// The stream is the MRC background layer (`--mrc`); phase 3 must add
+    /// the foreground + mask layer objects and rewrite the content streams
+    /// that draw the image (see [`Reencoded::Mrc`]).
+    #[cfg(feature = "optimize")]
+    Mrc {
+        stream: Stream,
+        fg: [u8; 3],
+        mask: Vec<u8>,
+        mask_codec: &'static [u8],
+        mask_global: Option<Vec<u8>>,
+        mask_w: u32,
+        mask_h: u32,
+        sites: Vec<crate::pdf::optimize::MrcSite>,
+    },
 }
 
 /// The best replacement for one stream's content, already chosen by the
@@ -419,6 +596,22 @@ enum Candidate {
         candidate: MaskCandidate,
         dims: Option<(u32, u32)>,
     },
+    /// 1-bit JBIG2 mask (lossless symbol coding), smaller than the source.
+    #[cfg(feature = "optimize")]
+    Jbig2 {
+        candidate: Jbig2Candidate,
+        dims: Option<(u32, u32)>,
+    },
+    /// JPEG2000 codestream, smaller than the source.
+    #[cfg(feature = "optimize")]
+    Jpeg2000 {
+        buf: Vec<u8>,
+        dims: Option<(u32, u32)>,
+    },
+    /// Mixed-raster composite (background + mask + foreground layers),
+    /// smaller than the source.
+    #[cfg(feature = "optimize")]
+    Mrc { candidate: MrcCandidate },
     /// The source content wins; nothing replaced it.
     Unchanged,
 }
@@ -470,6 +663,65 @@ impl MaskCandidate {
     }
 }
 
+/// A 1-bit lossless JBIG2 mask candidate (`--jbig2`, `optimize` feature),
+/// competing against the G4 mask in the size court.
+#[cfg(feature = "optimize")]
+struct Jbig2Candidate {
+    /// JBIG2 page stream (1 = ink, same bits as the G4 candidate).
+    page: Vec<u8>,
+    /// Symbol dictionary for `/JBIG2Globals`, when the encoder emits one.
+    global: Option<Vec<u8>>,
+}
+
+#[cfg(feature = "optimize")]
+impl Jbig2Candidate {
+    /// Full cost: page + dictionary + mask dictionary overhead.
+    fn total_size(&self) -> usize {
+        self.page.len() + self.global.as_ref().map_or(0, |g| g.len()) + PALETTE_OVERHEAD
+    }
+}
+
+/// A mixed-raster (MRC) composite candidate (`--mrc`, `optimize` feature):
+/// a flat paper-color background, a solid-color foreground layer, and a
+/// high-resolution lossless mask composited as the foreground's `/SMask`.
+/// This is the representation commercial scan compressors use; the
+/// candidate self-gates on the size court against the source and the plain
+/// JPEG.
+#[cfg(feature = "optimize")]
+struct MrcCandidate {
+    /// Background bytes: the solid paper color (median paper RGB, 3 bytes).
+    bg: Vec<u8>,
+    /// Background dimensions — always 1×1 for the flat paper layer.
+    bg_w: u32,
+    bg_h: u32,
+    /// Solid foreground color (median ink color), RGB.
+    fg: [u8; 3],
+    /// Encoded mask bytes (G4 or JBIG2).
+    mask: Vec<u8>,
+    /// `CCITTFaxDecode` or `JBIG2Decode`.
+    mask_codec: &'static [u8],
+    /// JBIG2 symbol dictionary, when the mask codec is JBIG2.
+    mask_global: Option<Vec<u8>>,
+    /// Mask raster dimensions (full resolution).
+    mask_w: u32,
+    mask_h: u32,
+    /// Content-stream sites that draw the image (where the foreground layer
+    /// must be injected).
+    sites: Vec<crate::pdf::optimize::MrcSite>,
+}
+
+#[cfg(feature = "optimize")]
+impl MrcCandidate {
+    /// Full cost: background + mask (+ dictionary) + the solid foreground
+    /// object and the content-stream rewrite overhead.
+    fn total_size(&self) -> usize {
+        self.bg.len()
+            + self.mask.len()
+            + self.mask_global.as_ref().map_or(0, |g| g.len())
+            + 3 * PALETTE_OVERHEAD
+    }
+}
+
 /// Re-encode a single image stream. The stream is owned and detached from the
 /// document, so this can run on any rayon worker thread.
 ///
@@ -490,12 +742,18 @@ fn reencode_image_stream<T: ImageTranscoder>(
     transcoder: &T,
     downsample: Option<Downsample<'_>>,
     opts: CompressOptions,
+    #[cfg(feature = "optimize")] mrc_index: Option<&crate::pdf::optimize::MrcIndex>,
 ) -> Reencoded {
     let CompressOptions {
         dpi: _,
         palette,
         classify,
+        jbig2,
+        jpeg2000,
+        mrc,
     } = opts;
+    #[cfg(not(feature = "optimize"))]
+    let _ = jpeg2000; // candidate construction is feature-gated below
     // Resolve `-q` / `-ssim` to the JPEG quality for this stream. In ssim
     // mode the calibration is deterministic, so the dedup key (which
     // includes the quality) stays valid.
@@ -831,10 +1089,12 @@ fn reencode_image_stream<T: ImageTranscoder>(
             // mixed pages get neither (the within-image split is future
             // work). `--palette` alone keeps offering the indexed candidate
             // to every eligible raster; the candidate itself still
-            // self-gates on the fidelity/size courts. The G4/palette
-            // *replacements* are gated on `classify` alone, keeping each
-            // flag self-sufficient.
-            let decision = if classify {
+            // self-gates on the fidelity/size courts. The `optimize`-feature
+            // flags `--jbig2` and `--mrc` also need the classifier's mask
+            // (their own bitonal input), so the classifier runs for them
+            // too — but the G4/palette *replacements* remain gated on
+            // `classify` alone, keeping each flag self-sufficient.
+            let decision = if classify || jbig2 || mrc {
                 Some(if tag == 3 {
                     classify_raster(key_bytes, ew, eh)
                 } else {
@@ -846,7 +1106,8 @@ fn reencode_image_stream<T: ImageTranscoder>(
 
             // A 1-bit CCITT G4 opaque-grayscale candidate for bitonal text,
             // offered only under `--raster-classify` (the flag that opts into
-            // the G4 representation).
+            // the G4 representation). `--jbig2`/`--mrc` compute the same
+            // decision for their own candidates without enabling G4.
             let mask: Option<MaskCandidate> = (classify
                 && decision
                     .as_ref()
@@ -905,6 +1166,9 @@ fn reencode_image_stream<T: ImageTranscoder>(
                     },
                 );
             }
+            let jpeg_len = jpeg.as_ref().map(|j| j.len());
+            #[cfg(not(feature = "optimize"))]
+            let _ = jpeg_len;
             if let Some(j) = jpeg {
                 consider(
                     j.len(),
@@ -913,6 +1177,112 @@ fn reencode_image_stream<T: ImageTranscoder>(
                         dims: resampled,
                     },
                 );
+            }
+            // `--jbig2` / `--jpeg2000` / `--mrc`: the `optimize`-feature
+            // codec candidates. Each enters the same size court and wins only
+            // when strictly smaller than the source and the other candidates.
+            #[cfg(feature = "optimize")]
+            {
+                let mask_bytes = decision.as_ref().and_then(|d| d.mask.as_deref());
+                // JBIG2: lossless symbol coding of the same mask bits the G4
+                // candidate uses (repeated glyph shapes share one dictionary
+                // entry). It competes against G4, so it wins only on content
+                // where symbol dictionaries genuinely pay off.
+                if jbig2
+                    && let Some(m) = mask_bytes
+                    && let Ok((page, global)) =
+                        crate::pdf::optimize::codecs::jbig2_encode(m, ew, eh)
+                {
+                    let c = Jbig2Candidate { page, global };
+                    consider(
+                        c.total_size(),
+                        Candidate::Jbig2 {
+                            candidate: c,
+                            dims: resampled,
+                        },
+                    );
+                }
+                // JPEG2000: rate-targeted lossy J2K of the RGB pixels at 85%
+                // of the JPEG candidate's byte budget. The rate target is
+                // only a sizing hint — before this candidate may enter the
+                // size court it is decoded back and measured against the
+                // source pixels (see [`CandidateEvidence`]): the first
+                // implementation of the generic runtime admission court.
+                // A candidate that fails to decode, is dimensionally
+                // unfaithful, or reconstructs below the SSIM gate never
+                // reaches the size competition, so byte savings alone are
+                // never sufficient for admission.
+                if jpeg2000
+                    && tag == 3
+                    && let Some(j) = jpeg_len
+                    && let Ok(cs) = crate::pdf::optimize::codecs::j2k_encode_rgb(
+                        key_bytes,
+                        ew,
+                        eh,
+                        (j as u64 * 85) / 100,
+                    )
+                    && let Some(ev) = j2k_candidate_evidence(&cs, key_bytes, ew, eh)
+                    && ev.ssim >= J2K_SSIM_GATE
+                {
+                    verbose!(
+                        verbose,
+                        "[img {:?}] → jpeg2000 admitted: {}B ssim {:.4} (luma err {:.2},                          chroma err {:.2}, edge err {:.2})",
+                        id,
+                        ev.bytes,
+                        ev.ssim,
+                        ev.luma_error,
+                        ev.chroma_error,
+                        ev.edge_error
+                    );
+                    consider(
+                        ev.bytes,
+                        Candidate::Jpeg2000 {
+                            buf: cs,
+                            dims: resampled,
+                        },
+                    );
+                }
+                // MRC: the commercial-scan representation — flat paper-color
+                // background, solid ink-color foreground composited through a
+                // high-res lossless mask (its /SMask). Offered only when the
+                // content scan found a draw site and nothing blocks the
+                // rewrite, and never for images with their own /SMask or
+                // /Decode (those semantics must be preserved verbatim).
+                if mrc
+                    && (tag == 3 || tag == 1)
+                    && let Some(m) = mask_bytes
+                    && stream.dict.get(b"SMask").is_err()
+                    && stream.dict.get(b"Decode").is_err()
+                    && let Some(ix) = mrc_index
+                    && !ix.blocked.contains(&id)
+                    && let Some(sites) = ix.sites.get(&id).filter(|s| !s.is_empty())
+                {
+                    // The layer builder works in RGB; a grayscale source is
+                    // expanded by triplicating its samples (same pixels, so
+                    // the background fill and the ink median are unchanged).
+                    let mrc_rgb: std::borrow::Cow<'_, [u8]> = if tag == 1 {
+                        std::borrow::Cow::Owned(key_bytes.iter().flat_map(|&v| [v, v, v]).collect())
+                    } else {
+                        std::borrow::Cow::Borrowed(key_bytes)
+                    };
+                    if let Ok((bg, (bw, bh), fg, mask, codec, global)) =
+                        crate::pdf::optimize::codecs::mrc_layers(&mrc_rgb, ew, eh, m, jbig2)
+                    {
+                        let c = MrcCandidate {
+                            bg,
+                            bg_w: bw,
+                            bg_h: bh,
+                            fg,
+                            mask,
+                            mask_codec: codec,
+                            mask_global: global,
+                            mask_w: ew,
+                            mask_h: eh,
+                            sites: sites.clone(),
+                        };
+                        consider(c.total_size(), Candidate::Mrc { candidate: c });
+                    }
+                }
             }
             match best {
                 Some((size, c)) if size < original_len => c,
@@ -1041,6 +1411,117 @@ fn reencode_image_stream<T: ImageTranscoder>(
                 stream.dict.set(b"Height", Object::Integer(th as i64));
             }
             Reencoded::Mask { stream }
+        }
+        #[cfg(feature = "optimize")]
+        Candidate::Jbig2 { candidate, dims } => {
+            verbose!(
+                verbose,
+                "[img {:?}] → compressed {}B → {}B 1-bit JBIG2 mask",
+                id,
+                original_len,
+                candidate.page.len()
+            );
+            // An *opaque* 1-bit grayscale image, exactly like the G4 mask
+            // candidate: 1 = ink. /Decode [1 0] maps the JBIG2 ink bit to
+            // decoded 0 = black and paper to 1 = white (phase 3 sets it).
+            stream.content = candidate.page;
+            stream
+                .dict
+                .set(b"Filter", Object::Name(b"JBIG2Decode".to_vec()));
+            stream
+                .dict
+                .set(b"Length", Object::Integer(stream.content.len() as i64));
+            stream
+                .dict
+                .set(b"ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+            stream.dict.set(b"BitsPerComponent", Object::Integer(1));
+            stream.dict.remove(b"ImageMask");
+            // JBIG2's decode polarity is the *default* [0 1] (poppler's
+            // decoder inverts its samples, so the identity table is what
+            // maps the ink bit to black across poppler, ghostscript and
+            // mutool alike); clear any source /Decode so it cannot leak.
+            stream.dict.remove(b"Decode");
+            if let Some((tw, th)) = dims {
+                stream.dict.set(b"Width", Object::Integer(tw as i64));
+                stream.dict.set(b"Height", Object::Integer(th as i64));
+            }
+            Reencoded::Jbig2 {
+                stream,
+                global: candidate.global,
+            }
+        }
+        #[cfg(feature = "optimize")]
+        Candidate::Jpeg2000 { buf, dims } => {
+            verbose!(
+                verbose,
+                "[img {:?}] → compressed {}B → {}B JPEG2000 (JPXDecode)",
+                id,
+                original_len,
+                buf.len()
+            );
+            stream.content = buf;
+            stream
+                .dict
+                .set(b"Filter", Object::Name(b"JPXDecode".to_vec()));
+            stream
+                .dict
+                .set(b"Length", Object::Integer(stream.content.len() as i64));
+            // The JP2 wrapper carries the sRGB colour space; the image
+            // dictionary keeps the source's `/ColorSpace /DeviceRGB` (they
+            // agree), while `/BitsPerComponent` and any source `/DecodeParms`
+            // are dropped — a JPXDecode image's bit depth lives in the
+            // codestream, and a stale decode table would corrupt it.
+            stream.dict.remove(b"BitsPerComponent");
+            stream.dict.remove(b"DecodeParms");
+            stream.dict.remove(b"Decode");
+            if let Some((tw, th)) = dims {
+                stream.dict.set(b"Width", Object::Integer(tw as i64));
+                stream.dict.set(b"Height", Object::Integer(th as i64));
+            }
+            Reencoded::Jpeg2000 { stream }
+        }
+        #[cfg(feature = "optimize")]
+        Candidate::Mrc { candidate } => {
+            verbose!(
+                verbose,
+                "[img {:?}] → compressed {}B → {}B MRC (bg {}B + mask {}B)",
+                id,
+                original_len,
+                candidate.total_size(),
+                candidate.bg.len(),
+                candidate.mask.len()
+            );
+            // The stream becomes the MRC *background* layer: a 1×1 solid
+            // image of the median paper color (a flat fill — never a JPEG,
+            // whose near-flat bitstreams poppler and Ghostscript mis-decode
+            // as a full-page gradient). Phase 3 adds the foreground + mask
+            // objects and rewrites the content streams — the rewrite emits
+            // the foreground draw without a `cm` (the source image's own
+            // transform is still current there; re-emitting it would square
+            // the scale and poppler's soft-mask allocator would overflow on
+            // the "Bogus memory allocation size" path).
+            let mut bg = Stream::new(dictionary! {}, candidate.bg);
+            bg.dict.set(b"Type", Object::Name(b"XObject".to_vec()));
+            bg.dict.set(b"Subtype", Object::Name(b"Image".to_vec()));
+            bg.dict
+                .set(b"ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
+            bg.dict.set(b"BitsPerComponent", Object::Integer(8));
+            bg.dict
+                .set(b"Width", Object::Integer(candidate.bg_w as i64));
+            bg.dict
+                .set(b"Height", Object::Integer(candidate.bg_h as i64));
+            bg.dict
+                .set(b"Length", Object::Integer(bg.content.len() as i64));
+            Reencoded::Mrc {
+                stream: bg,
+                fg: candidate.fg,
+                mask: candidate.mask,
+                mask_codec: candidate.mask_codec,
+                mask_global: candidate.mask_global,
+                mask_w: candidate.mask_w,
+                mask_h: candidate.mask_h,
+                sites: candidate.sites,
+            }
         }
     }
 }
@@ -1503,6 +1984,135 @@ fn ssim_window(a: &[u8], b: &[u8], width: u32, height: u32) -> f64 {
     ssim_luma(&luma_of(&a), &luma_of(&b))
 }
 
+/// Measured reconstruction fidelity of one lossy candidate: the candidate is
+/// decoded back and compared against the source pixels on the project's
+/// native 512-px window, and only then may the size court rank it.
+///
+/// This is the generic admission interface every future lossy representation
+/// (JPEG, Jpegli, palette, MRC, …) is expected to fill — a candidate earns
+/// its place by *measured* quality, never by construction heuristics or
+/// byte-budget ratios alone. JPEG2000 is the first implementation.
+#[cfg(feature = "optimize")]
+struct CandidateEvidence {
+    /// Encoded candidate size in bytes — what the size court ranks on.
+    bytes: usize,
+    /// Native-window SSIM (Rec. 601 luma, 512-px Triangle resize) — the
+    /// same witness the render courts use.
+    ssim: f64,
+    /// Mean absolute luma difference on the native window (0–255 scale).
+    luma_error: f64,
+    /// Mean absolute per-channel RGB difference on the native window
+    /// (0–255 scale).
+    chroma_error: f64,
+    /// Mean absolute Sobel-edge magnitude difference on the native window
+    /// (0–255 scale) — the sharpness / text-fidelity witness. Blurring (the
+    /// typical rate-targeted failure mode) shows up here even when mean
+    /// luma error stays small.
+    edge_error: f64,
+}
+
+/// Decode a JP2 candidate and measure it against the source RGB pixels on
+/// the native comparison window ([`native_windows`]). `None` means the
+/// candidate cannot be decoded or is not dimensionally faithful — it must
+/// not enter the size court.
+#[cfg(feature = "optimize")]
+fn j2k_candidate_evidence(cs: &[u8], rgb: &[u8], w: u32, h: u32) -> Option<CandidateEvidence> {
+    let mut decoder = j2k::J2kDecoder::new(cs).ok()?;
+    let img = decoder.decode_srgb8().ok()?;
+    let (dw, dh) = img.dimensions();
+    if dw != w || dh != h {
+        // A candidate that silently changes resolution is not a faithful
+        // substitute for the source — reject it outright.
+        return None;
+    }
+    // Normalize the decoded layout to interleaved RGB so the comparison is
+    // apples-to-apples with the source key bytes.
+    // `J2kSrgb8Layout` is `#[non_exhaustive]`: an unknown future layout
+    // cannot be compared faithfully, so the candidate is rejected.
+    let decoded: Vec<u8> = match img.layout() {
+        j2k::J2kSrgb8Layout::Gray => img.data().iter().flat_map(|&v| [v, v, v]).collect(),
+        j2k::J2kSrgb8Layout::Rgb => img.data().to_vec(),
+        j2k::J2kSrgb8Layout::Rgba => img
+            .data()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|c| [c[0], c[1], c[2]])
+            .collect(),
+        _ => return None,
+    };
+    let (ra, rb) = native_windows(rgb, &decoded, w, h);
+    let (la, lb) = (luma_of(&ra), luma_of(&rb));
+    Some(CandidateEvidence {
+        bytes: cs.len(),
+        ssim: ssim_luma(&la, &lb),
+        luma_error: mean_abs_diff(&la, &lb),
+        chroma_error: mean_abs_rgb_diff(&ra, &rb),
+        edge_error: edge_mae(&la, &lb),
+    })
+}
+
+/// Mean absolute luma difference of two equal-size gray images (0–255
+/// scale).
+#[cfg(feature = "optimize")]
+fn mean_abs_diff(a: &image::GrayImage, b: &image::GrayImage) -> f64 {
+    let count = (a.width() * a.height()) as f64;
+    a.pixels()
+        .zip(b.pixels())
+        .map(|(x, y)| (x[0] as f64 - y[0] as f64).abs())
+        .sum::<f64>()
+        / count
+}
+
+/// Mean absolute per-channel difference of two equal-size RGB images
+/// (0–255 scale, all three channels pooled).
+#[cfg(feature = "optimize")]
+fn mean_abs_rgb_diff(a: &image::RgbImage, b: &image::RgbImage) -> f64 {
+    let count = (a.width() * a.height() * 3) as f64;
+    a.pixels()
+        .zip(b.pixels())
+        .map(|(x, y)| {
+            (x[0] as f64 - y[0] as f64).abs()
+                + (x[1] as f64 - y[1] as f64).abs()
+                + (x[2] as f64 - y[2] as f64).abs()
+        })
+        .sum::<f64>()
+        / count
+}
+
+/// Sobel gradient magnitude at one pixel of a luma image, zero outside the
+/// border, clamped to the 0–255 range.
+#[cfg(feature = "optimize")]
+fn sobel_mag(img: &image::GrayImage, x: u32, y: u32) -> f64 {
+    let (w, h) = (img.width(), img.height());
+    let at = |dx: i32, dy: i32| {
+        let (px, py) = (x as i32 + dx, y as i32 + dy);
+        if px < 0 || py < 0 || px >= w as i32 || py >= h as i32 {
+            0.0
+        } else {
+            f64::from(img.get_pixel(px as u32, py as u32)[0])
+        }
+    };
+    let gx = (at(-1, -1) + 2.0 * at(-1, 0) + at(-1, 1)) - (at(1, -1) + 2.0 * at(1, 0) + at(1, 1));
+    let gy = (at(-1, -1) + 2.0 * at(0, -1) + at(1, -1)) - (at(-1, 1) + 2.0 * at(0, 1) + at(1, 1));
+    (gx * gx + gy * gy).sqrt().min(255.0)
+}
+
+/// Mean absolute Sobel-magnitude difference of two equal-size luma images —
+/// the sharpness witness.
+#[cfg(feature = "optimize")]
+fn edge_mae(a: &image::GrayImage, b: &image::GrayImage) -> f64 {
+    let (w, h) = (a.width(), a.height());
+    let count = (w * h) as f64;
+    let mut sum = 0.0;
+    for y in 0..h {
+        for x in 0..w {
+            sum += (sobel_mag(a, x, y) - sobel_mag(b, x, y)).abs();
+        }
+    }
+    sum / count
+}
+
 /// Identity of one image stream for coalescing: canonical dict bytes (sans
 /// `/Length` and `/Name`) plus the exact payload.
 type ImageIdentity = (Arc<[u8]>, Arc<[u8]>);
@@ -1771,6 +2381,72 @@ mod tests {
         if let Some(c) = cand {
             assert_eq!(c.indices.len(), (w * h) as usize, "one index per pixel");
         }
+    }
+
+    /// The JPEG2000 runtime admission gate: a candidate is decoded back and
+    /// measured against the source pixels (see [`CandidateEvidence`]), and
+    /// only a reconstruction above [`J2K_SSIM_GATE`] may enter the size
+    /// court. The clean photo clears the gate; the heavy-noise photo at the
+    /// same rate target degrades below it; garbage bytes produce no
+    /// evidence at all.
+    #[test]
+    #[cfg(all(test, feature = "optimize"))]
+    fn j2k_runtime_gate_admits_clean_and_rejects_degraded() {
+        use super::{J2K_SSIM_GATE, j2k_candidate_evidence};
+        use crate::pdf::optimize::codecs::j2k_encode_rgb;
+        use crate::transcode::{CpuTranscoder, ImageRef, ImageTranscoder, Input};
+
+        let (w, h) = (512u32, 384u32);
+        let clean = photoish(w, h);
+        let heavy: Vec<u8> = {
+            let mut next: u64 = 42;
+            let mut v = Vec::with_capacity((w * h * 3) as usize);
+            for y in 0..h {
+                for x in 0..w {
+                    next ^= next << 13;
+                    next ^= next >> 7;
+                    next ^= next << 17;
+                    let n = (next & 0x7f) as u8;
+                    let (r, g, b) = (
+                        (x as f32 / w as f32 * 255.0) as u8,
+                        (y as f32 / h as f32 * 255.0) as u8,
+                        (128.0 + 80.0 * ((x as f32 + y as f32) / 32.0).sin()) as u8,
+                    );
+                    v.extend_from_slice(&[r.wrapping_add(n), g.wrapping_add(n), b.wrapping_add(n)]);
+                }
+            }
+            v
+        };
+        let t = CpuTranscoder::default();
+        let encode = |pixels: &[u8]| {
+            let jpeg = t
+                .transcode_image(
+                    &Input::Pixels(ImageRef::Rgb8 {
+                        width: w,
+                        height: h,
+                        bytes: pixels,
+                    }),
+                    50,
+                )
+                .unwrap();
+            j2k_encode_rgb(pixels, w, h, (jpeg.len() as u64 * 85) / 100).unwrap()
+        };
+        let ev = j2k_candidate_evidence(&encode(&clean), &clean, w, h).expect("clean decodes");
+        assert!(
+            ev.ssim >= J2K_SSIM_GATE,
+            "clean photo must clear the gate: ssim {:.4}",
+            ev.ssim
+        );
+        let ev = j2k_candidate_evidence(&encode(&heavy), &heavy, w, h).expect("noisy decodes");
+        assert!(
+            ev.ssim < J2K_SSIM_GATE,
+            "heavy-noise photo must fail the gate: ssim {:.4}",
+            ev.ssim
+        );
+        assert!(
+            j2k_candidate_evidence(b"not a jp2 file", &clean, w, h).is_none(),
+            "undecodable bytes must never produce evidence"
+        );
     }
 
     #[test]

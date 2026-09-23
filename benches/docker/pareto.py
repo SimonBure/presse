@@ -100,7 +100,9 @@ def render(pdf: Path, prefix: Path, pages: list[int], dpi: int) -> dict[int, np.
     return out
 
 
-def tool_settings(tools: list[str]) -> list[tuple[str, str, list[str]]]:
+def tool_settings(
+    tools: list[str], optimize: bool = False
+) -> list[tuple[str, str, list[str]]]:
     """(tool, setting-label, command template with {in} {out})"""
     out = []
     for q in QUALITIES:
@@ -120,6 +122,25 @@ def tool_settings(tools: list[str]) -> list[tuple[str, str, list[str]]]:
         out.append(("presse", f"q{q}-palette-classify", ["{presse}", "press", "-q", str(q),
                                                            "--palette", "--raster-classify",
                                                            "{in}", "-o", "{out}"]))
+        # optimize-feature candidates (need a `--features optimize` build; gated
+        # behind --optimize so a plain build's sweep doesn't run them). The
+        # default-off codec candidates (JBIG2/JPEG2000/MRC), the structural
+        # passes (dedup/zopfli/font-subset) and the effort presets, at one
+        # quality each. They enter the same size court as everything else, so
+        # this is where the Pareto matrix sees them.
+        if optimize and q == 50:
+            for label, extra in [
+                ("jbig2", ["--jbig2"]),
+                ("jpeg2000", ["--jpeg2000"]),
+                ("mrc", ["--mrc"]),
+                ("font-subset", ["--font-subset"]),
+                ("dedup", ["--dedup"]),
+                ("zopfli", ["--zopfli"]),
+                ("comp-small", ["--compression", "small"]),
+                ("comp-smallest", ["--compression", "smallest"]),
+            ]:
+                out.append(("presse", f"q{q}-{label}",
+                            ["{presse}", "press", "-q", str(q), *extra, "{in}", "-o", "{out}"]))
         out.append(("qpdf", f"q{q}", ["qpdf", "--optimize-images", f"--jpeg-quality={q}",
                                       "--object-streams=generate", "{in}", "{out}"]))
         out.append(("mutool", f"jpeg:{q}", ["mutool", "clean", "-i", "-gggg", "-z",
@@ -162,13 +183,17 @@ def main():
     ap.add_argument("--thresholds", default="0.9999,0.999,0.995,0.99")
     ap.add_argument("--pages", type=int, default=8)
     ap.add_argument("--tools", default="presse,qpdf,mutool,pdf-optimizer,ghostscript,ocrmypdf")
+    ap.add_argument("--optimize", action="store_true",
+                    help="also sweep the optimize-feature candidates (--jbig2/--jpeg2000/"
+                         "--mrc/--font-subset/--dedup/--zopfli and --compression presets; "
+                         "the presse binary must be a --features optimize build)")
     ap.add_argument("--csv", type=Path)
     args = ap.parse_args()
 
     render_dpis = [int(d) for d in args.render_dpis.split(",")]
     thresholds = [float(t) for t in args.thresholds.split(",")]
     tools = args.tools.split(",")
-    settings = [s for s in tool_settings(tools) if s[0] in tools]
+    settings = [s for s in tool_settings(tools, args.optimize) if s[0] in tools]
     strict = max(render_dpis)  # the fidelity witness
 
     writer = None

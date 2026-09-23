@@ -197,9 +197,9 @@ pub fn classify(rgb: &[u8], width: u32, height: u32) -> Classification {
     let mask = if bitonal {
         // Full-resolution mask from the full-resolution luma: one pass.
         // Rows are packed to whole bytes (each row's partial byte is
-        // pushed at the row end), matching the `encode_g4` contract — a
-        // flat pack would only agree with it when the width is a multiple
-        // of 8.
+        // pushed at the row end), matching the `encode_g4` / `jbig2_encode`
+        // / `mrc_layers` contract — a flat pack would only agree with them
+        // when the width is a multiple of 8.
         let mut full = Vec::with_capacity((width as usize).div_ceil(8) * height as usize);
         let mut acc = 0u8;
         let mut nbits = 0u8;
@@ -286,7 +286,7 @@ pub fn classify_gray(gray: &[u8], width: u32, height: u32) -> Classification {
 
     let mask = if bitonal {
         // Row-packed like `classify` (see there): each row's partial byte
-        // is pushed at the row end, matching the G4 mask consumer.
+        // is pushed at the row end, matching the G4/JBIG2/MRC consumers.
         let row_bytes = (width as usize).div_ceil(8);
         let mut full = Vec::with_capacity(row_bytes * height as usize);
         for row in 0..height as usize {

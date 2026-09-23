@@ -3,6 +3,7 @@ pub mod classify;
 pub mod fax;
 pub mod images;
 pub mod merger;
+pub mod optimize;
 pub(crate) mod placements;
 pub mod reader;
 pub mod writer;
