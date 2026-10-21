@@ -3898,3 +3898,290 @@ fn font_subset_keeps_text_and_renders_identically() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Standalone images (`presse press` on JPEG / PNG)
+// ---------------------------------------------------------------------------
+
+fn jpeg_segment(marker: u8, payload: &[u8]) -> Vec<u8> {
+    let mut s = vec![0xFF, marker];
+    s.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+    s.extend_from_slice(payload);
+    s
+}
+
+/// A q95 JPEG of `rgb` with extra segments inserted right after SOI.
+fn jpeg_with_segments(rgb: &[u8], w: u32, h: u32, segments: &[Vec<u8>]) -> Vec<u8> {
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 95)
+        .encode(rgb, w, h, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    let mut out = jpeg[..2].to_vec();
+    for s in segments {
+        out.extend_from_slice(s);
+    }
+    out.extend_from_slice(&jpeg[2..]);
+    out
+}
+
+/// EXIF payload (after `Exif\0\0`): IFD0 with Make = "CamX" and Orientation.
+fn exif_with_make_and_orientation(orientation: u16) -> Vec<u8> {
+    let mut t = b"II*\0".to_vec();
+    t.extend_from_slice(&8u32.to_le_bytes());
+    t.extend_from_slice(&2u16.to_le_bytes());
+    t.extend_from_slice(&[0x0F, 0x01, 2, 0, 4, 0, 0, 0, b'C', b'a', b'm', b'X']);
+    t.extend_from_slice(&[0x12, 0x01, 3, 0, 1, 0, 0, 0]);
+    t.extend_from_slice(&orientation.to_le_bytes());
+    t.extend_from_slice(&[0, 0]);
+    t.extend_from_slice(&0u32.to_le_bytes());
+    t
+}
+
+fn exif_orientation_of(jpeg: &[u8]) -> Option<u16> {
+    let at = jpeg.windows(6).position(|w| w == b"Exif\0\0")? + 6;
+    let t = &jpeg[at..];
+    let le = &t[..2] == b"II";
+    let rd16 = |b: &[u8]| {
+        if le {
+            u16::from_le_bytes([b[0], b[1]])
+        } else {
+            u16::from_be_bytes([b[0], b[1]])
+        }
+    };
+    let ifd = if le {
+        u32::from_le_bytes(t[4..8].try_into().unwrap())
+    } else {
+        u32::from_be_bytes(t[4..8].try_into().unwrap())
+    } as usize;
+    (0..rd16(&t[ifd..]) as usize).find_map(|i| {
+        let e = ifd + 2 + i * 12;
+        (rd16(&t[e..]) == 0x0112).then(|| rd16(&t[e + 8..]))
+    })
+}
+
+fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut crc = flate2::Crc::new();
+    crc.update(kind);
+    crc.update(data);
+    let mut c = (data.len() as u32).to_be_bytes().to_vec();
+    c.extend_from_slice(kind);
+    c.extend_from_slice(data);
+    c.extend_from_slice(&crc.sum().to_be_bytes());
+    c
+}
+
+/// A fast-deflated RGB PNG of `rgb`, with `extra` chunks after IHDR.
+fn png_with_chunks(rgb: &[u8], w: u32, h: u32, extra: &[u8]) -> Vec<u8> {
+    use image::ImageEncoder;
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new_with_quality(
+        &mut png,
+        image::codecs::png::CompressionType::Fast,
+        image::codecs::png::FilterType::NoFilter,
+    )
+    .write_image(rgb, w, h, image::ExtendedColorType::Rgb8)
+    .unwrap();
+    let at = 8 + 25; // signature + IHDR
+    [&png[..at], extra, &png[at..]].concat()
+}
+
+#[test]
+fn press_cli_images_keep_format_and_metadata_policy() {
+    let dir = test_dir().join("img-cli");
+    std::fs::create_dir_all(dir.join("out")).unwrap();
+    let (w, h) = (320, 240);
+    let rgb = photoish_rgb(w, h);
+    let mut exif = b"Exif\0\0".to_vec();
+    exif.extend_from_slice(&exif_with_make_and_orientation(6));
+    let icc_payload = [b"ICC_PROFILE\0\x01\x01".as_slice(), &[0x5A; 300]].concat();
+    let jpeg = jpeg_with_segments(
+        &rgb,
+        w,
+        h,
+        &[
+            jpeg_segment(0xE1, &exif),
+            jpeg_segment(0xE2, &icc_payload),
+            jpeg_segment(0xFE, b"secret comment"),
+        ],
+    );
+    std::fs::write(dir.join("photo.jpg"), &jpeg).unwrap();
+
+    let (fw, fh) = (200, 150);
+    let figure = flat_figure_rgb(fw, fh);
+    let png = png_with_chunks(
+        &figure,
+        fw,
+        fh,
+        &png_chunk(b"tEXt", b"Comment\0secret text"),
+    );
+    std::fs::write(dir.join("figure.png"), &png).unwrap();
+
+    let status = Command::new(env!("CARGO_BIN_EXE_presse"))
+        .arg("press")
+        .arg(dir.join("photo.jpg"))
+        .arg(dir.join("figure.png"))
+        .arg("-o")
+        .arg(format!("{}/", dir.join("out").display()))
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let out_jpeg = std::fs::read(dir.join("out/photo_compressed.jpg")).unwrap();
+    assert!(
+        out_jpeg.len() < jpeg.len(),
+        "q80 re-encode of a q95 JPEG must shrink"
+    );
+    let decoded = image::load_from_memory(&out_jpeg).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (w, h));
+    assert_eq!(
+        exif_orientation_of(&out_jpeg),
+        Some(6),
+        "orientation must survive"
+    );
+    assert!(
+        !out_jpeg.windows(4).any(|x| x == b"CamX"),
+        "camera EXIF must be removed"
+    );
+    assert!(
+        !out_jpeg.windows(6).any(|x| x == b"secret"),
+        "comments must be removed"
+    );
+    assert!(
+        out_jpeg
+            .windows(icc_payload.len())
+            .any(|x| x == icc_payload),
+        "the ICC profile must be kept byte for byte"
+    );
+
+    let out_png = std::fs::read(dir.join("out/figure_compressed.png")).unwrap();
+    assert!(out_png.len() < png.len());
+    let decoded = image::load_from_memory(&out_png).unwrap().to_rgb8();
+    assert_eq!(
+        decoded.into_raw(),
+        figure,
+        "PNG compression must be lossless"
+    );
+    assert!(
+        !out_png.windows(4).any(|x| x == b"tEXt"),
+        "text chunks must be removed"
+    );
+}
+
+#[test]
+fn press_cli_keep_metadata_keeps_everything() {
+    let dir = test_dir().join("img-keep");
+    std::fs::create_dir_all(&dir).unwrap();
+    let rgb = photoish_rgb(160, 120);
+    let mut exif = b"Exif\0\0".to_vec();
+    exif.extend_from_slice(&exif_with_make_and_orientation(3));
+    let jpeg = jpeg_with_segments(
+        &rgb,
+        160,
+        120,
+        &[jpeg_segment(0xE1, &exif), jpeg_segment(0xFE, b"keep me")],
+    );
+    std::fs::write(dir.join("a.jpg"), &jpeg).unwrap();
+    let out = dir.join("a_out.jpg");
+    let status = Command::new(env!("CARGO_BIN_EXE_presse"))
+        .args(["press", "--keep-metadata", "-o"])
+        .arg(&out)
+        .arg(dir.join("a.jpg"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let out = std::fs::read(out).unwrap();
+    assert!(out.windows(4).any(|x| x == b"CamX"));
+    assert!(out.windows(7).any(|x| x == b"keep me"));
+    assert_eq!(exif_orientation_of(&out), Some(3));
+}
+
+#[test]
+fn press_cli_unchanged_image_is_copied_as_is() {
+    let dir = test_dir().join("img-unchanged");
+    std::fs::create_dir_all(&dir).unwrap();
+    let figure = flat_figure_rgb(120, 80);
+    std::fs::write(dir.join("f.png"), png_with_chunks(&figure, 120, 80, &[])).unwrap();
+    let presse = env!("CARGO_BIN_EXE_presse");
+    let run = |input: &Path, output: &Path| {
+        assert!(
+            Command::new(presse)
+                .arg("press")
+                .arg(input)
+                .arg("-o")
+                .arg(output)
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    run(&dir.join("f.png"), &dir.join("once.png"));
+    // Already optimal: the second run cannot do better and must copy it.
+    run(&dir.join("once.png"), &dir.join("twice.png"));
+    assert_eq!(
+        std::fs::read(dir.join("once.png")).unwrap(),
+        std::fs::read(dir.join("twice.png")).unwrap()
+    );
+}
+
+#[test]
+fn press_cli_mixed_batch_warns_once_about_pdf_only_flags() {
+    let dir = test_dir().join("img-mixed");
+    std::fs::create_dir_all(dir.join("out")).unwrap();
+    let (mut doc, pages_id) = new_doc();
+    add_image_page(&mut doc, pages_id, photoish_rgb(160, 160), 160, 160, false);
+    save_pdf(&mut doc, dir.join("doc.pdf").to_str().unwrap()).unwrap();
+    let rgb = photoish_rgb(96, 64);
+    std::fs::write(dir.join("a.jpg"), jpeg_with_segments(&rgb, 96, 64, &[])).unwrap();
+    std::fs::write(dir.join("b.jpg"), jpeg_with_segments(&rgb, 96, 64, &[])).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_presse"))
+        .arg("press")
+        .arg(dir.join("doc.pdf"))
+        .arg(dir.join("a.jpg"))
+        .arg(dir.join("b.jpg"))
+        .args(["-d", "150", "-o"])
+        .arg(format!("{}/", dir.join("out").display()))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr
+            .matches("--dpi only apply to PDFs; ignored for images")
+            .count(),
+        1,
+        "one warning per run, not per image: {stderr}"
+    );
+    assert_well_formed(&dir.join("out/doc_compressed.pdf"));
+    assert!(dir.join("out/a_compressed.jpg").exists());
+    assert!(dir.join("out/b_compressed.jpg").exists());
+}
+
+#[test]
+fn library_presser_detects_and_compresses() {
+    use presse::{Format, PdfOptions, PressOptions, Pressed, Presser, detect};
+    let rgb = photoish_rgb(128, 96);
+    let jpeg = jpeg_with_segments(&rgb, 128, 96, &[]);
+    assert_eq!(detect(&jpeg), Some(Format::Jpeg));
+    let presser = Presser::new(
+        PressOptions {
+            quality: 60,
+            ssim: None,
+            palette: false,
+            keep_metadata: false,
+            pdf: PdfOptions::default(),
+            verbose: false,
+        },
+        Acceleration::Cpu,
+        false,
+    )
+    .unwrap();
+    match presser.press(&jpeg).unwrap() {
+        Pressed::Image(bytes) => {
+            assert!(bytes.len() < jpeg.len());
+            assert_eq!(detect(&bytes), Some(Format::Jpeg));
+        }
+        _ => panic!("a q95 JPEG must come back as a smaller JPEG"),
+    }
+    assert!(presser.press(b"RIFF\0\0\0\0WEBPVP8 ").is_err());
+}

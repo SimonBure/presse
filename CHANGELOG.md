@@ -6,6 +6,21 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **JPEG and PNG files in `presse press`** — inputs are detected from
+  their bytes; images are compressed in their own format and named
+  `<input>_compressed.<ext>`. JPEG: metadata-stripped original vs a
+  re-encode at `-q`/`-s` through the PDF pipeline's transcoder. PNG,
+  lossless by default: metadata stripping, 16→8-bit / alpha / gray
+  reductions, exact palettes (≤256 colors, 1–8 bit), level-9 deflate;
+  `--palette` adds the PDF pipeline's SSIM-gated lossy palette. The
+  smallest candidate wins; when none beats the input, it is copied
+  unchanged. Metadata: ICC profile and EXIF orientation kept, the rest
+  removed; **`--keep-metadata`** keeps everything. PDF-only flags are
+  ignored for images with one warning per run. WebP/GIF/TIFF/BMP are
+  skipped for now. PDF output is byte-identical to before.
+- **Library entry point** — `presse::Presser::press(&[u8])` dispatches on
+  `presse::detect` (PDF, JPEG, PNG) and returns `presse::Pressed`.
+
 - **`--jpeg-encoder`** (`press --jpeg-encoder`, off by default) — swap the
   CPU JPEG encoder from the `image` crate's 4:4:4 to the pure-Rust
   `jpeg-encoder` codec at YCbCr 4:2:0 with box-averaged chroma

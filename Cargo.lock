@@ -1175,6 +1175,7 @@ dependencies = [
  "lopdf",
  "memmap2",
  "mimalloc",
+ "png",
  "rayon",
  "subsetter",
  "zopfli",

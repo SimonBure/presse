@@ -1,7 +1,10 @@
 #[macro_use]
 mod macros;
 mod cli;
+mod format;
+mod img;
 mod pdf;
+mod press;
 mod transcode;
 
 // Rayon workers constantly allocate and drop temporary buffers during image
@@ -11,19 +14,22 @@ mod transcode;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+use std::path::Path;
+
+use format::{Format, detect};
 use pdf::builder::image_to_pdf;
-use pdf::images::{CompressOptions, QualityMode, compress_images, compress_images_opt};
+use pdf::images::compress_images;
 use pdf::merger::merge;
 use pdf::reader::{
-    get_compression_ratio_in_percent, get_pdf_size_in_kilobytes, load_input_as_pdf, load_pdf,
+    get_compression_ratio_in_percent, get_pdf_size_in_kilobytes, load_input_as_pdf, map_file,
 };
-use pdf::writer::{compress_and_save_pdf, recompress_flate as recompress_flate_streams, save_pdf};
-use transcode::resolve;
+use pdf::writer::{compress_and_save_pdf, save_pdf};
+use press::{PdfOptions, PressOptions, Pressed, Presser};
 
 use clap::Parser;
 use cli::args::{
     Cli, Commands, CompressionMode, resolve_convert_path_output, resolve_merge_path_output,
-    resolve_press_path_output,
+    resolve_press_output, resolve_press_path_output,
 };
 
 use indicatif::{ProgressBar, ProgressStyle};
@@ -50,8 +56,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             jpeg2000,
             mrc,
             compression,
+            keep_metadata,
             verbose,
         } => {
+            // Flags that only mean something for PDFs, as typed (before the
+            // presets expand). Image inputs ignore them, with one warning,
+            // so a mixed batch never fails because of them.
+            let pdf_only: Vec<&str> = [
+                (dpi.is_some(), "--dpi"),
+                (raster_classify, "--raster-classify"),
+                (recompress_flate, "--recompress-flate"),
+                (dedup, "--dedup"),
+                (zopfli, "--zopfli"),
+                (font_subset, "--font-subset"),
+                (jbig2, "--jbig2"),
+                (jpeg2000, "--jpeg2000"),
+                (mrc, "--mrc"),
+                (compression != CompressionMode::Fast, "--compression"),
+            ]
+            .into_iter()
+            .filter_map(|(set, name)| set.then_some(name))
+            .collect();
+            let mut warned_pdf_only = false;
+
             // `--compression` presets expand to the individual flags; the
             // user's own flags always win (a preset never *un*-sets one).
             let (dedup, zopfli, font_subset, jbig2, jpeg2000, mrc, recompress_flate) =
@@ -93,7 +120,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // that was not compiled in is an explicit error; a compiled-in
             // backend whose driver is missing warns and falls back to CPU.
             // `--jpeg-encoder` selects the 4:2:0 codec for the CPU path.
-            let transcoder = resolve(acceleration, jpeg_encoder)?;
+            let presser = Presser::new(
+                PressOptions {
+                    quality,
+                    ssim,
+                    palette,
+                    keep_metadata,
+                    pdf: PdfOptions {
+                        dpi,
+                        raster_classify,
+                        recompress_flate,
+                        dedup,
+                        zopfli,
+                        font_subset,
+                        jbig2,
+                        jpeg2000,
+                        mrc,
+                    },
+                    verbose,
+                },
+                acceleration,
+                jpeg_encoder,
+            )?;
             let bar = ProgressBar::new(input.len() as u64);
             bar.set_style(
                 ProgressStyle::default_bar()
@@ -125,68 +173,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             for file_path in &input {
-                // Loading the document
-                let mut doc = match load_pdf(file_path.to_str().unwrap()) {
-                    Ok(doc) => doc,
+                let data = match map_file(file_path) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        eprintln!("Skipping {}: {}", file_path.display(), e);
+                        continue;
+                    }
+                };
+                let image_format = detect(&data).filter(|f| *f != Format::Pdf);
+                if image_format.is_some() && !pdf_only.is_empty() && !warned_pdf_only {
+                    eprintln!(
+                        "warning: {} only apply to PDFs; ignored for images",
+                        pdf_only.join(", ")
+                    );
+                    warned_pdf_only = true;
+                }
+
+                // Unmap the input before writing (the output may be the input
+                // file itself). PDFs release it right after parsing: lopdf
+                // copies what it needs, and compression can take a while.
+                let pressed: Result<Pressed, Box<dyn std::error::Error>> = if image_format.is_some()
+                {
+                    let pressed = presser.press(&data);
+                    drop(data);
+                    pressed
+                } else {
+                    let doc = lopdf::Document::load_mem(&data);
+                    drop(data);
+                    doc.map(|doc| Pressed::Pdf(Box::new(presser.press_pdf(doc))))
+                        .map_err(Into::into)
+                };
+                let pressed = match pressed {
+                    Ok(pressed) => pressed,
                     Err(e) => {
                         eprintln!("Skipping {}: {}", file_path.display(), e);
                         continue;
                     }
                 };
 
-                compress_images_opt(
-                    &mut doc,
-                    QualityMode::press(quality, ssim),
-                    verbose,
-                    &transcoder,
-                    CompressOptions {
-                        dpi,
-                        palette,
-                        classify: raster_classify,
-                        jbig2,
-                        jpeg2000,
-                        mrc,
-                    },
-                );
-
-                // `--dedup` (optimize feature): extend the duplicate-image
-                // coalescing to every byte-identical non-image stream.
-                if dedup {
-                    let n = pdf::optimize::dedup_streams(&mut doc);
-                    verbose!(verbose, "[dedup] coalesced {n} duplicate stream object(s)");
-                }
-
-                // `--recompress-flate` (qpdf-style): re-encode existing
-                // Flate streams at the writer's level before saving.
-                if recompress_flate {
-                    let n = recompress_flate_streams(&mut doc);
-                    verbose!(
-                        verbose,
-                        "[writer] recompressed {n} existing FlateDecode stream(s)"
-                    );
-                }
-
-                // `--zopfli` (optimize feature): the same recompression with
-                // the deliberately slower Zopfli search (strictly-smaller
-                // gate, pure size win at CPU cost).
-                if zopfli {
-                    let n = pdf::optimize::recompress_flate_zopfli(&mut doc);
-                    verbose!(verbose, "[zopfli] recompressed {n} FlateDecode stream(s)");
-                }
-
-                // `--font-subset` (optimize feature): subset embedded
-                // TrueType fonts to the glyphs the content actually uses;
-                // CFF (FontFile3) programs are skipped, and every font is
-                // left untouched unless the used-glyph mapping resolves
-                // exactly and the subset is strictly smaller.
-                if font_subset {
-                    let n = pdf::optimize::subset_fonts(&mut doc);
-                    verbose!(verbose, "[fonts] subset {n} font(s)");
-                }
-
-                // Compressing the document
-                let output = resolve_press_path_output(file_path, &output);
-                compress_and_save_pdf(&mut doc, output.to_str().unwrap(), verbose)?;
+                let output = match image_format {
+                    Some(f) => {
+                        let ext = file_path.extension().and_then(|e| e.to_str());
+                        resolve_press_output(file_path, &output, ext.unwrap_or(f.extension()))
+                    }
+                    None => resolve_press_path_output(file_path, &output),
+                };
+                let kept = match pressed {
+                    Pressed::Pdf(mut doc) => {
+                        compress_and_save_pdf(&mut doc, output.to_str().unwrap(), verbose)?;
+                        None
+                    }
+                    Pressed::Image(bytes) => {
+                        std::fs::write(&output, bytes)?;
+                        None
+                    }
+                    Pressed::Unchanged(reason) => {
+                        if !same_file(file_path, &output) {
+                            std::fs::copy(file_path, &output)?;
+                        }
+                        Some(reason)
+                    }
+                };
 
                 // Compression summary
                 if verbose {
@@ -196,9 +243,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         get_pdf_size_in_kilobytes(output.to_str().unwrap()).unwrap();
                     let compression_ratio =
                         get_compression_ratio_in_percent(original_size, compressed_size);
+                    let note = kept
+                        .map(|reason| format!(", original kept: {reason}"))
+                        .unwrap_or_default();
                     bar.println(format!(
-                        "{}kB → {}kB ({:.2}% compression)",
-                        original_size, compressed_size, compression_ratio
+                        "{}kB → {}kB ({:.2}% compression){}",
+                        original_size, compressed_size, compression_ratio, note
                     ));
                 }
 
@@ -298,4 +348,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// True when both paths name the same existing file.
+fn same_file(a: &Path, b: &Path) -> bool {
+    matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
 }
