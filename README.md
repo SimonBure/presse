@@ -13,7 +13,7 @@
 A fast command-line tool for PDF manipulation written in Rust.
 
 **Compress and merge** PDF files naturally and easily with this ready-to-use command line tool.
-**Convert images** of any format into ready-to-use pdfs.
+**Convert images** (PNG, JPEG, WebP, GIF, TIFF, BMP) into ready-to-use pdfs.
 
 **~7× faster** than ghostscript (median, per-document on a 100-PDF corpus) and **~2× faster than single-threaded** rayon. Benchmarked in [`benches/docker/RESULTS.md`](benches/docker/RESULTS.md) — the headline figure is a median; best case is much higher, mean is lower.
 
@@ -25,7 +25,7 @@ A fast command-line tool for PDF manipulation written in Rust.
 - **Batch processing** — compress multiple files in one command via shell wildcards
 - **Smart output paths** — sensible defaults, explicit naming, or output to a directory
 - **PDF merging** — combine multiple documents into one, with optional compression
-- **Image conversion** — transform any image (.png, .jpg) into a .pdf
+- **Image conversion** — transform PNG, JPEG, WebP, GIF, TIFF and BMP images into a .pdf (format detected from the file's bytes, not its extension)
 - **Merge docs and images** in a single command, with smart format detection
 
 ## Installation
