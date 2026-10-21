@@ -157,6 +157,17 @@ All notable changes to this project will be documented in this file.
 - `mimalloc` on the musl release artifact; `zlib-rs` deflate backend;
   memory-mapped input reads; deduplicated image re-encodes.
 
+### Changed
+
+- **Image inputs trimmed to PNG, JPEG, WebP, GIF, TIFF and BMP** — the
+  `image` crate is built without its default feature set. That set
+  compiled an AVIF encoder (rav1e) presse never used and decoders for
+  EXR, HDR, DDS, QOI, TGA, PNM, ICO and Farbfeld, which `convert` and
+  `merge` no longer accept. AVIF input was never readable (it needs
+  `image`'s C `avif-native` feature). Measured on clean release builds
+  (4 cores, one run each): 150 → 110 crates, build 113 s → 77–83 s,
+  binary 7.13 → 6.03 MB.
+
 ### Fixed
 
 - **Cross-reference correctness** — objects are renumbered before saving,
