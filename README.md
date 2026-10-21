@@ -27,7 +27,7 @@ A fast command-line tool for PDF and image compression written in Rust.
 - **Batch processing** — compress multiple files in one command via shell wildcards
 - **Smart output paths** — sensible defaults, explicit naming, or output to a directory
 - **PDF merging** — combine multiple documents into one, with optional compression
-- **Image conversion** — transform PNG, JPEG, WebP, GIF, TIFF and BMP images into a .pdf (format detected from the file's bytes, not its extension)
+- **Image conversion** — transform PNG, JPEG, WebP, GIF, TIFF and BMP images into a .pdf, or into JPEG, PNG or lossless WebP (input format detected from the file's bytes, not its extension)
 - **Merge docs and images** in a single command, with smart format detection
 
 ## Installation
@@ -402,6 +402,43 @@ presse merge a.pdf b.pdf --compress
 |------|---------|-------------|
 | `-o, --output` | `merged.pdf` | Output file or directory |
 | `-c, --compress` | `false` | Compress images in the merged document |
+
+### Convert — `presse convert`
+
+```bash
+# Images to PDF (the default) — outputs photo.pdf
+presse convert photo.jpg
+
+# The -o extension picks the format: .pdf, .jpg, .png or .webp
+presse convert photo.png -o photo.webp
+
+# --to picks it when -o has no extension (batch into a directory)
+presse convert *.png --to jpg -q 85 -o jpegs/
+
+# All images into one compressed PDF
+presse convert *.png -m -c -q 50
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o, --output` | `<input>.<ext>` | Output file or directory; a file's extension picks the format |
+| `-t, --to` | `pdf` | Output format when `-o` has no extension: `pdf`, `jpg`/`jpeg`, `png`, `webp` |
+| `-m, --merge` | `false` | Merge all images into a single PDF (PDF output only) |
+| `-c, --compress` | `false` | JPEG-compress the images embedded in the PDF output |
+| `-q, --quality` | `80` | JPEG quality, for `--compress` and for JPEG output |
+
+Image output uses the same encoders as `presse press`: JPEG through the
+PDF pipeline's encoder, PNG through the lossless optimizer (palettes,
+reductions, level-9 deflate), WebP lossless (presse has no lossy WebP
+encoder). The ICC profile and EXIF orientation follow the image when the
+output can hold them (a profile is dropped when it doesn't match the
+output's color model, e.g. a CMYK profile on RGB pixels); other metadata
+is not carried. Transparent areas become white in JPEG. Animated inputs
+keep their first frame. When the result is larger than the input (a photo
+JPEG as lossless WebP or PNG usually is), it is written anyway with a
+warning. An output that would overwrite its own input is skipped.
+`-o` with an unknown extension, or one that disagrees with `--to`, is an
+error.
 
 ## GPU acceleration (experimental)
 

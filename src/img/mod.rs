@@ -1,5 +1,6 @@
 //! Standalone image compression (JPEG, PNG), output in the input's format.
 
+pub(crate) mod convert;
 mod exif;
 pub(crate) mod jpeg;
 pub(crate) mod png;

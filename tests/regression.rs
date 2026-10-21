@@ -4185,3 +4185,167 @@ fn library_presser_detects_and_compresses() {
     }
     assert!(presser.press(b"RIFF\0\0\0\0WEBPVP8 ").is_err());
 }
+
+// ---------------------------------------------------------------------------
+// `presse convert` to image formats
+// ---------------------------------------------------------------------------
+
+fn presse_convert(args: &[&std::ffi::OsStr]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_presse"))
+        .arg("convert")
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+/// A fake ICC profile: a 128-byte header whose color space field says RGB.
+fn fake_rgb_icc() -> Vec<u8> {
+    let mut icc = vec![0x11u8; 200];
+    icc[16..20].copy_from_slice(b"RGB ");
+    icc
+}
+
+fn png_iccp(png: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut i = 8;
+    while i + 8 <= png.len() {
+        let n = u32::from_be_bytes(png[i..i + 4].try_into().unwrap()) as usize;
+        let data = &png[i + 8..i + 8 + n];
+        if &png[i + 4..i + 8] == b"iCCP" {
+            let at = data.iter().position(|&b| b == 0)? + 2;
+            let mut out = Vec::new();
+            flate2::read::ZlibDecoder::new(&data[at..])
+                .read_to_end(&mut out)
+                .ok()?;
+            return Some(out);
+        }
+        i += 12 + n;
+    }
+    None
+}
+
+#[test]
+fn convert_cli_extension_or_to_picks_the_format() {
+    let dir = test_dir().join("conv-format");
+    std::fs::create_dir_all(dir.join("out")).unwrap();
+    let figure = flat_figure_rgb(90, 60);
+    std::fs::write(dir.join("f.png"), png_with_chunks(&figure, 90, 60, &[])).unwrap();
+
+    let o = presse_convert(&[
+        dir.join("f.png").as_os_str(),
+        "-o".as_ref(),
+        dir.join("f.webp").as_os_str(),
+    ]);
+    assert!(o.status.success());
+    let webp = std::fs::read(dir.join("f.webp")).unwrap();
+    assert_eq!(presse::detect(&webp), Some(presse::Format::WebP));
+    let back = image::load_from_memory(&webp).unwrap().to_rgb8().into_raw();
+    assert_eq!(back, figure, "WebP output is lossless");
+
+    let out_dir = format!("{}/", dir.join("out").display());
+    let o = presse_convert(&[
+        dir.join("f.png").as_os_str(),
+        "--to".as_ref(),
+        "jpg".as_ref(),
+        "-o".as_ref(),
+        out_dir.as_ref(),
+    ]);
+    assert!(o.status.success());
+    let jpeg = std::fs::read(dir.join("out/f.jpg")).unwrap();
+    assert_eq!(presse::detect(&jpeg), Some(presse::Format::Jpeg));
+
+    // No -o extension and no --to: PDF, as before.
+    let o = presse_convert(&[dir.join("f.png").as_os_str()]);
+    assert!(o.status.success());
+    assert_well_formed(&dir.join("f.pdf"));
+}
+
+#[test]
+fn convert_cli_rejects_conflicts_and_never_overwrites_inputs() {
+    let dir = test_dir().join("conv-rules");
+    std::fs::create_dir_all(&dir).unwrap();
+    let figure = flat_figure_rgb(30, 20);
+    let src = png_with_chunks(&figure, 30, 20, &[]);
+    std::fs::write(dir.join("g.png"), &src).unwrap();
+    let g = dir.join("g.png");
+
+    let conflict = presse_convert(&[
+        g.as_os_str(),
+        "-o".as_ref(),
+        dir.join("x.png").as_os_str(),
+        "--to".as_ref(),
+        "webp".as_ref(),
+    ]);
+    assert!(!conflict.status.success());
+    let unknown = presse_convert(&[g.as_os_str(), "-o".as_ref(), dir.join("x.tiff").as_os_str()]);
+    assert!(!unknown.status.success());
+    let merge = presse_convert(&[
+        g.as_os_str(),
+        "-m".as_ref(),
+        "--to".as_ref(),
+        "png".as_ref(),
+    ]);
+    assert!(!merge.status.success());
+
+    // g.png --to png would write g.png itself: skipped, input untouched.
+    let same = presse_convert(&[g.as_os_str(), "--to".as_ref(), "png".as_ref()]);
+    assert!(same.status.success());
+    assert!(String::from_utf8_lossy(&same.stderr).contains("would overwrite the input"));
+    assert_eq!(std::fs::read(&g).unwrap(), src);
+}
+
+#[test]
+fn convert_cli_carries_icc_and_orientation_and_warns_when_larger() {
+    let dir = test_dir().join("conv-meta");
+    std::fs::create_dir_all(&dir).unwrap();
+    let rgb = photoish_rgb(64, 48);
+    let icc = fake_rgb_icc();
+    let mut exif = b"Exif\0\0".to_vec();
+    exif.extend_from_slice(&exif_with_make_and_orientation(6));
+    let jpeg = jpeg_with_segments(
+        &rgb,
+        64,
+        48,
+        &[
+            jpeg_segment(0xE1, &exif),
+            jpeg_segment(0xE2, &[b"ICC_PROFILE\0\x01\x01".as_slice(), &icc].concat()),
+        ],
+    );
+    std::fs::write(dir.join("p.jpg"), &jpeg).unwrap();
+
+    let o = presse_convert(&[
+        dir.join("p.jpg").as_os_str(),
+        "-o".as_ref(),
+        dir.join("p.png").as_os_str(),
+    ]);
+    assert!(o.status.success());
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("is larger than"),
+        "a photo JPEG as lossless PNG is larger, and says so"
+    );
+    let png = std::fs::read(dir.join("p.png")).unwrap();
+    assert_eq!(png_iccp(&png), Some(icc.clone()), "ICC profile kept");
+    let exif_at = png
+        .windows(4)
+        .position(|w| w == b"eXIf")
+        .expect("eXIf chunk")
+        + 4;
+    let mut as_jpeg_exif = b"Exif\0\0".to_vec();
+    as_jpeg_exif.extend_from_slice(&png[exif_at..]);
+    assert_eq!(
+        exif_orientation_of(&as_jpeg_exif),
+        Some(6),
+        "orientation kept"
+    );
+    assert!(!png.windows(4).any(|w| w == b"CamX"), "other EXIF dropped");
+
+    let o = presse_convert(&[
+        dir.join("p.jpg").as_os_str(),
+        "-o".as_ref(),
+        dir.join("p.webp").as_os_str(),
+    ]);
+    assert!(o.status.success());
+    let webp = std::fs::read(dir.join("p.webp")).unwrap();
+    assert!(webp.windows(4).any(|w| w == b"ICCP"));
+    assert!(webp.windows(icc.len()).any(|w| w == icc.as_slice()));
+}

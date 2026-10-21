@@ -28,9 +28,11 @@ use press::{PdfOptions, PressOptions, Pressed, Presser};
 
 use clap::Parser;
 use cli::args::{
-    Cli, Commands, CompressionMode, resolve_convert_path_output, resolve_merge_path_output,
-    resolve_press_output, resolve_press_path_output,
+    Cli, Commands, CompressionMode, resolve_convert_format, resolve_convert_output,
+    resolve_convert_path_output, resolve_merge_path_output, resolve_press_output,
+    resolve_press_path_output,
 };
+use img::convert::convert_image;
 
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -287,12 +289,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Convert {
             input,
             output,
+            to,
             merge: do_merge,
             compress,
             quality,
             verbose,
         } => {
-            if do_merge {
+            // Output format: the -o extension, else --to, else PDF (the
+            // historical behavior).
+            let target = match resolve_convert_format(&output, to) {
+                Ok(target) => target,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            if target != Format::Pdf {
+                convert_to_images(
+                    &input, &output, target, do_merge, compress, quality, verbose,
+                )?;
+            } else if do_merge {
                 let mut docs = Vec::new();
                 for path in &input {
                     match image_to_pdf(path, verbose) {
@@ -347,6 +363,77 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    Ok(())
+}
+
+/// `convert` to JPEG, PNG or WebP: one output file per input.
+fn convert_to_images(
+    input: &[std::path::PathBuf],
+    output: &Option<std::path::PathBuf>,
+    target: Format,
+    merge: bool,
+    compress: bool,
+    quality: u8,
+    verbose: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if merge {
+        eprintln!("Error: --merge needs PDF output");
+        std::process::exit(1);
+    }
+    if compress {
+        eprintln!(
+            "warning: --compress applies to PDF output only; ignored (-q sets the JPEG quality)"
+        );
+    }
+    // Same multi-file/-o guard as the PDF path.
+    if input.len() > 1
+        && let Some(path) = output
+        && !path.is_dir()
+        && !path.to_str().unwrap().ends_with('/')
+    {
+        eprintln!("Error: -o must be a directory when converting multiple images");
+        std::process::exit(1);
+    }
+    let kb = |n: usize| format!("{:.1} kB", n as f64 / 1000.0);
+
+    for path in input {
+        let out = resolve_convert_output(path, output, target.extension());
+        if same_file(path, &out) {
+            eprintln!(
+                "Skipping {}: the output would overwrite the input",
+                path.display()
+            );
+            continue;
+        }
+        let converted = std::fs::read(path)
+            .map_err(Into::into)
+            .and_then(|source| convert_image(&source, target, quality).map(|c| (source, c)));
+        let (source, converted) = match converted {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!("Skipping {}: {}", path.display(), e);
+                continue;
+            }
+        };
+        std::fs::write(&out, &converted)?;
+        if converted.len() > source.len() {
+            eprintln!(
+                "warning: {} ({}) is larger than {} ({})",
+                out.display(),
+                kb(converted.len()),
+                path.display(),
+                kb(source.len())
+            );
+        }
+        verbose!(
+            verbose,
+            "{} → {} ({} → {})",
+            path.display(),
+            out.display(),
+            kb(source.len()),
+            kb(converted.len())
+        );
+    }
     Ok(())
 }
 

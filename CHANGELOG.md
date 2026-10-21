@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`presse convert` to JPEG, PNG and WebP** — the `-o` extension picks
+  the output format (`.pdf`, `.jpg`, `.png`, `.webp`), else the new
+  **`-t/--to`**, else PDF as before. JPEG goes through the PDF pipeline's
+  encoder at `-q`, PNG through the lossless optimizer, WebP is lossless.
+  The ICC profile (when it matches the output's color model) and EXIF
+  orientation are carried over; transparency becomes white in JPEG. A
+  larger result is written with a warning; an output that would overwrite
+  its input is skipped; `--merge` stays PDF-only. Library:
+  `presse::convert_image`.
+
 - **JPEG and PNG files in `presse press`** — inputs are detected from
   their bytes; images are compressed in their own format and named
   `<input>_compressed.<ext>`. JPEG: metadata-stripped original vs a
@@ -174,6 +184,10 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **`convert -o` extension now matters** — `presse convert a.png -o
+  out.jpg` writes a JPEG (it used to write a PDF named `out.jpg`), and an
+  unsupported extension such as `-o out.tiff` is an error instead of a PDF
+  with that name. Without `-o` or with `-o dir/`, output is PDF as before.
 - **Image inputs trimmed to PNG, JPEG, WebP, GIF, TIFF and BMP** — the
   `image` crate is built without its default feature set. That set
   compiled an AVIF encoder (rav1e) presse never used and decoders for
