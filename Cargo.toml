@@ -3,7 +3,7 @@ name = "presse"
 version = "0.4.0"
 edition = "2024"
 authors = ["Simon Buré"]
-description = "Fast compression CLI for PDF, JPEG and PNG files — image recompression and structural optimization"
+description = "Fast compression CLI for PDF, JPEG, PNG and WebP files — image recompression and structural optimization"
 license = "GPL-3.0"
 repository = "https://github.com/SimonBure/presse"
 homepage = "https://github.com/SimonBure/presse"
@@ -49,8 +49,8 @@ image = { version = "0.25.9", default-features = false, features = ["bmp", "gif"
 # Writes palette PNGs, which `image` cannot. Same version `image` already
 # pulls in, so no new crate.
 png = "0.18"
-# Lossless WebP output for `convert` (with ICC/EXIF). Already pulled in by
-# `image`, so no new crate.
+# Lossless WebP encoding (`convert`, and `press` on WebP files). Already
+# pulled in by `image`, so no new crate.
 image-webp = "0.2"
 
 # Parallel image re-encoding

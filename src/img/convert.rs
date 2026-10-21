@@ -10,7 +10,7 @@ use std::io::Cursor;
 
 use image::{DynamicImage, ImageDecoder};
 
-use super::{exif, jpeg, png};
+use super::{exif, jpeg, png, webp};
 use crate::format::{Format, detect};
 use crate::transcode::{CpuTranscoder, ImageRef, ImageTranscoder, Input};
 
@@ -136,14 +136,8 @@ fn to_webp(
     icc: Option<&[u8]>,
     orientation: Option<u16>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    use image_webp::ColorType;
     let (width, height) = (img.width(), img.height());
-    let (data, color) = match (img.color().has_color(), img.color().has_alpha()) {
-        (false, false) => (img.to_luma8().into_raw(), ColorType::L8),
-        (false, true) => (img.to_luma_alpha8().into_raw(), ColorType::La8),
-        (true, false) => (img.to_rgb8().into_raw(), ColorType::Rgb8),
-        (true, true) => (img.to_rgba8().into_raw(), ColorType::Rgba8),
-    };
+    let (data, color) = webp::lossless_pixels(&img);
     let mut out = Vec::new();
     let mut encoder = image_webp::WebPEncoder::new(&mut out);
     if let Some(p) = icc {

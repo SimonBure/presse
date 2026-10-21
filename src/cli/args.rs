@@ -57,9 +57,9 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Compress PDF documents and JPEG/PNG images (format detected from content)
+    /// Compress PDF documents and JPEG/PNG/WebP images (format detected from content)
     Press {
-        /// Input files: PDF, JPEG or PNG, mixed freely
+        /// Input files: PDF, JPEG, PNG or WebP, mixed freely
         input: Vec<PathBuf>,
 
         /// Output file or directory (optional, defaults to
@@ -68,7 +68,7 @@ pub enum Commands {
         output: Option<PathBuf>,
 
         /// Target quality for lossy image compression (images inside PDFs
-        /// and JPEG files; PNG files stay lossless)
+        /// and JPEG files; PNG and WebP files stay lossless)
         #[arg(short, long, default_value_t = 80)]
         quality: u8,
 
@@ -308,8 +308,8 @@ Default (flag omitted): JPEG-only pipeline, current behavior."
         )]
         compression: CompressionMode,
 
-        /// Keep all image metadata in JPEG/PNG files (EXIF, XMP, comments,
-        /// text chunks). Default: keep only the ICC color profile and the
+        /// Keep all image metadata in JPEG/PNG/WebP files (EXIF, XMP,
+        /// comments, text chunks). Default: keep only the ICC color profile and the
         /// EXIF orientation.
         #[arg(long, default_value_t = false)]
         keep_metadata: bool,
