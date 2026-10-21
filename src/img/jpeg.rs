@@ -121,7 +121,7 @@ fn orientation(jpeg: &[u8], header: &Header) -> Option<u16> {
 }
 
 /// An APP1 segment holding only the EXIF orientation.
-fn orientation_segment(orientation: u16) -> Vec<u8> {
+pub(crate) fn orientation_segment(orientation: u16) -> Vec<u8> {
     let tiff = exif::orientation_only(orientation);
     let len = (2 + 6 + tiff.len()) as u16;
     let mut seg = vec![0xFF, APP1];
@@ -129,6 +129,24 @@ fn orientation_segment(orientation: u16) -> Vec<u8> {
     seg.extend_from_slice(b"Exif\0\0");
     seg.extend_from_slice(&tiff);
     seg
+}
+
+/// APP2 segments holding `icc`, split into numbered chunks of at most
+/// 65519 bytes (the segment limit minus the `ICC_PROFILE\0` + sequence
+/// header). `None` when the profile is empty or needs more than 255 chunks.
+pub(crate) fn icc_segments(icc: &[u8]) -> Option<Vec<u8>> {
+    const MAX_CHUNK: usize = 65535 - 2 - 14;
+    let chunks: Vec<&[u8]> = icc.chunks(MAX_CHUNK).collect();
+    let count = u8::try_from(chunks.len()).ok().filter(|&n| n > 0)?;
+    let mut out = Vec::with_capacity(icc.len() + chunks.len() * 18);
+    for (i, chunk) in chunks.iter().enumerate() {
+        out.extend_from_slice(&[0xFF, APP2]);
+        out.extend_from_slice(&((2 + 14 + chunk.len()) as u16).to_be_bytes());
+        out.extend_from_slice(b"ICC_PROFILE\0");
+        out.extend_from_slice(&[i as u8 + 1, count]);
+        out.extend_from_slice(chunk);
+    }
+    Some(out)
 }
 
 /// Lossless candidate: the original with metadata segments removed. The
@@ -178,7 +196,7 @@ fn carried_segments(jpeg: &[u8], header: &Header, keep_metadata: bool) -> Vec<u8
 }
 
 /// Insert `extra` segments after the SOI and JFIF header of `encoded`.
-fn with_segments(encoded: &[u8], extra: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn with_segments(encoded: &[u8], extra: &[u8]) -> Option<Vec<u8>> {
     let header = parse_header(encoded)?;
     let at = match header.segments.first() {
         Some(s) if is_jfif(encoded, s) => s.whole.end,
@@ -319,6 +337,26 @@ mod tests {
             with_segments(&enc, &extra).unwrap(),
             jpeg_with(&[jfif, extra])
         );
+    }
+
+    #[test]
+    fn icc_segments_split_and_number() {
+        let icc = vec![7u8; 65519 * 2 + 10];
+        let src = jpeg_with(&[icc_segments(&icc).unwrap()]);
+        let header = parse_header(&src).unwrap();
+        let parts: Vec<&[u8]> = header
+            .segments
+            .iter()
+            .filter(|s| is_icc(&src, s))
+            .map(|s| payload(&src, s))
+            .collect();
+        assert_eq!(parts.len(), 3);
+        for (i, p) in parts.iter().enumerate() {
+            assert_eq!(&p[12..14], &[i as u8 + 1, 3]);
+        }
+        let joined: Vec<u8> = parts.iter().flat_map(|p| p[14..].to_vec()).collect();
+        assert_eq!(joined, icc);
+        assert!(icc_segments(&[]).is_none());
     }
 
     #[test]

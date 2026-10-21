@@ -1,7 +1,30 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 
+use crate::format::Format;
 use crate::transcode::Acceleration;
+
+/// `convert --to` output formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    Pdf,
+    #[value(alias = "jpg")]
+    Jpeg,
+    Png,
+    /// Lossless WebP.
+    Webp,
+}
+
+impl OutputFormat {
+    pub fn format(self) -> Format {
+        match self {
+            OutputFormat::Pdf => Format::Pdf,
+            OutputFormat::Jpeg => Format::Jpeg,
+            OutputFormat::Png => Format::Png,
+            OutputFormat::Webp => Format::WebP,
+        }
+    }
+}
 
 /// Compression effort preset (`--compression`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
@@ -309,24 +332,30 @@ Default (flag omitted): JPEG-only pipeline, current behavior."
         compress: bool,
     },
 
-    /// Convert one or several images to PDF
+    /// Convert images to PDF (default), JPEG, PNG or WebP
     Convert {
         /// Input image files
         input: Vec<PathBuf>,
 
-        /// Output file or directory (optional)
+        /// Output file or directory (optional). A file's extension picks the
+        /// output format: .pdf, .jpg, .png or .webp
         #[arg(short, long)]
         output: Option<PathBuf>,
+
+        /// Output format when -o gives no extension (default: pdf). WebP
+        /// output is lossless
+        #[arg(short, long, value_enum)]
+        to: Option<OutputFormat>,
 
         /// Merge all images into a single PDF
         #[arg(short, long, default_value_t = false)]
         merge: bool,
 
-        /// JPEG-compress the embedded images
+        /// JPEG-compress the images embedded in the PDF output
         #[arg(short, long, default_value_t = false)]
         compress: bool,
 
-        /// Target quality for --compress (1-100)
+        /// JPEG quality (1-100): for --compress, and for JPEG output
         #[arg(short, long, default_value_t = 80)]
         quality: u8,
 
@@ -363,13 +392,59 @@ pub fn resolve_press_output(
 }
 
 pub fn resolve_convert_path_output(file_path: &Path, output: &Option<PathBuf>) -> PathBuf {
+    resolve_convert_output(file_path, output, "pdf")
+}
+
+/// Like [`resolve_convert_path_output`], for an output with the given
+/// extension.
+pub fn resolve_convert_output(
+    file_path: &Path,
+    output: &Option<PathBuf>,
+    extension: &str,
+) -> PathBuf {
     match output {
         Some(path) if path.is_dir() || path.to_str().unwrap().ends_with('/') => {
             let stem = file_path.file_stem().unwrap().to_str().unwrap();
-            path.join(format!("{}.pdf", stem))
+            path.join(format!("{}.{}", stem, extension))
         }
         Some(path) => path.clone(),
-        None => file_path.with_extension("pdf"),
+        None => file_path.with_extension(extension),
+    }
+}
+
+/// The `convert` output format: the `-o` file extension, else `--to`, else
+/// PDF. An unknown extension, or one that disagrees with `--to`, is an error.
+pub fn resolve_convert_format(
+    output: &Option<PathBuf>,
+    to: Option<OutputFormat>,
+) -> Result<Format, String> {
+    let from_extension = match output {
+        Some(path) if !(path.is_dir() || path.to_str().unwrap_or("").ends_with('/')) => {
+            match path.extension().and_then(|e| e.to_str()) {
+                None => None,
+                Some(ext) => Some(match ext.to_ascii_lowercase().as_str() {
+                    "pdf" => Format::Pdf,
+                    "jpg" | "jpeg" | "jpe" | "jfif" => Format::Jpeg,
+                    "png" => Format::Png,
+                    "webp" => Format::WebP,
+                    _ => {
+                        return Err(format!(
+                            "unsupported output extension .{ext} (use .pdf, .jpg, .png or .webp)"
+                        ));
+                    }
+                }),
+            }
+        }
+        _ => None,
+    };
+    match (from_extension, to.map(OutputFormat::format)) {
+        (Some(a), Some(b)) if a != b => Err(format!(
+            "-o asks for {} but --to asks for {}",
+            a.name(),
+            b.name()
+        )),
+        (Some(a), _) | (None, Some(a)) => Ok(a),
+        (None, None) => Ok(Format::Pdf),
     }
 }
 
@@ -385,5 +460,58 @@ pub fn resolve_merge_path_output(output: &Option<PathBuf>, compress: bool) -> Pa
         }
         Some(path) => path.clone(),
         None => PathBuf::from(default_name),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn out(p: &str) -> Option<PathBuf> {
+        Some(PathBuf::from(p))
+    }
+
+    #[test]
+    fn convert_format_rules() {
+        assert_eq!(resolve_convert_format(&None, None), Ok(Format::Pdf));
+        assert_eq!(
+            resolve_convert_format(&out("a.WEBP"), None),
+            Ok(Format::WebP)
+        );
+        assert_eq!(
+            resolve_convert_format(&out("a.jpeg"), None),
+            Ok(Format::Jpeg)
+        );
+        assert_eq!(
+            resolve_convert_format(&out("dir/"), Some(OutputFormat::Png)),
+            Ok(Format::Png)
+        );
+        assert_eq!(
+            resolve_convert_format(&out("noext"), Some(OutputFormat::Jpeg)),
+            Ok(Format::Jpeg)
+        );
+        assert_eq!(
+            resolve_convert_format(&out("a.png"), Some(OutputFormat::Png)),
+            Ok(Format::Png)
+        );
+        assert!(resolve_convert_format(&out("a.png"), Some(OutputFormat::Webp)).is_err());
+        assert!(resolve_convert_format(&out("a.tiff"), None).is_err());
+    }
+
+    #[test]
+    fn convert_output_names() {
+        let p = Path::new("photos/cat.jpg");
+        assert_eq!(
+            resolve_convert_output(p, &None, "webp"),
+            PathBuf::from("photos/cat.webp")
+        );
+        assert_eq!(
+            resolve_convert_output(p, &out("out/"), "png"),
+            PathBuf::from("out/cat.png")
+        );
+        assert_eq!(
+            resolve_convert_path_output(p, &None),
+            PathBuf::from("photos/cat.pdf")
+        );
     }
 }

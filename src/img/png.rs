@@ -87,7 +87,7 @@ fn parse_chunks(png: &[u8]) -> Option<Vec<Chunk>> {
     (&chunks.first()?.kind == b"IHDR").then_some(chunks)
 }
 
-fn chunk_bytes(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+pub(crate) fn chunk_bytes(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
     let mut crc = flate2::Crc::new();
     crc.update(kind);
     crc.update(data);
@@ -99,10 +99,21 @@ fn chunk_bytes(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
     out
 }
 
+/// An `iCCP` chunk holding `icc` (zlib-compressed, as the chunk requires).
+pub(crate) fn iccp_chunk(icc: &[u8]) -> Vec<u8> {
+    let mut data = b"ICC profile\0\0".to_vec(); // name, separator, method 0
+    data.extend_from_slice(&crate::pdf::images::zlib_encode(icc));
+    chunk_bytes(b"iCCP", &data)
+}
+
+/// An `eXIf` chunk holding only the EXIF orientation.
+pub(crate) fn orientation_exif_chunk(orientation: u16) -> Vec<u8> {
+    chunk_bytes(b"eXIf", &exif::orientation_only(orientation))
+}
+
 fn orientation_chunk(png: &[u8], chunks: &[Chunk]) -> Option<Vec<u8>> {
     let tiff = &png[chunks.iter().find(|c| &c.kind == b"eXIf")?.data.clone()];
-    exif::keepable(exif::orientation(tiff))
-        .map(|o| chunk_bytes(b"eXIf", &exif::orientation_only(o)))
+    exif::keepable(exif::orientation(tiff)).map(orientation_exif_chunk)
 }
 
 /// Lossless candidate: the original minus metadata chunks.
@@ -142,7 +153,7 @@ fn carried_chunks(png: &[u8], chunks: &[Chunk], keep_metadata: bool) -> Vec<u8> 
 
 /// Decoded pixels: `channels` interleaved samples per pixel, 8 or 16 bits
 /// each (16-bit samples big-endian, as PNG stores them).
-struct Raster {
+pub(crate) struct Raster {
     width: u32,
     height: u32,
     channels: usize,
@@ -151,7 +162,7 @@ struct Raster {
 }
 
 impl Raster {
-    fn from_image(img: image::DynamicImage) -> Option<Self> {
+    pub(crate) fn from_image(img: image::DynamicImage) -> Option<Self> {
         use image::DynamicImage as D;
         let (width, height) = (img.width(), img.height());
         let be = |s: &[u16]| s.iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<u8>>();
@@ -376,7 +387,7 @@ fn encode_indexed(r: &Raster, ix: &Indexed) -> Option<Vec<u8>> {
 }
 
 /// Insert `extra` (complete chunks) right after IHDR.
-fn with_chunks(encoded: Vec<u8>, extra: &[u8]) -> Vec<u8> {
+pub(crate) fn with_chunks(encoded: Vec<u8>, extra: &[u8]) -> Vec<u8> {
     if extra.is_empty() {
         return encoded;
     }
@@ -386,6 +397,60 @@ fn with_chunks(encoded: Vec<u8>, extra: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&encoded[..at]);
     out.extend_from_slice(extra);
     out.extend_from_slice(&encoded[at..]);
+    out
+}
+
+/// Every PNG encoding of `r` worth trying, without ancillary chunks:
+/// lossless reductions + level-9 deflate, an exact palette when the colors
+/// allow, and (with `palette`) the SSIM-gated lossy palette. `gray_ok`
+/// false keeps color images in color (an RGB ICC profile must not end up
+/// on a grayscale image).
+pub(crate) fn encodings(
+    mut r: Raster,
+    gray_ok: bool,
+    palette: bool,
+) -> Vec<(Vec<u8>, &'static str)> {
+    let mut out = Vec::new();
+    r.reduce_depth();
+    r.reduce_alpha();
+    if gray_ok {
+        r.reduce_gray();
+    }
+    let depth = if r.sixteen {
+        png::BitDepth::Sixteen
+    } else {
+        png::BitDepth::Eight
+    };
+    if let Some(b) = encode(
+        &r,
+        r.color_type(),
+        depth,
+        &r.data,
+        None,
+        png::Filter::Adaptive,
+    ) {
+        out.push((b, "re-encoded (lossless)"));
+    }
+    match exact_palette(&r) {
+        Some(ix) => {
+            if let Some(b) = encode_indexed(&r, &ix) {
+                out.push((b, "exact palette (lossless)"));
+            }
+        }
+        None if palette && !r.sixteen && r.channels == 3 => {
+            if let Some(c) = crate::pdf::images::indexed_candidate(&r.data, r.width, r.height) {
+                let ix = Indexed {
+                    palette: c.palette,
+                    trns: None,
+                    indices: c.indices,
+                };
+                if let Some(b) = encode_indexed(&r, &ix) {
+                    out.push((b, "quantized palette (SSIM ≥ 0.9999)"));
+                }
+            }
+        }
+        None => {}
+    }
     out
 }
 
@@ -416,51 +481,15 @@ pub(crate) fn press(
     if chunks.iter().any(|c| &c.kind == b"acTL") {
         verbose!(verbose, "[png] animated PNG: not re-encoded");
     } else {
-        let mut r = image::load_from_memory_with_format(png_bytes, image::ImageFormat::Png)
+        let r = image::load_from_memory_with_format(png_bytes, image::ImageFormat::Png)
             .ok()
             .and_then(Raster::from_image)
             .ok_or("PNG decode failed")?;
         let extra = carried_chunks(png_bytes, &chunks, keep_metadata);
-        r.reduce_depth();
-        r.reduce_alpha();
         // An RGB ICC profile is invalid on a grayscale image.
-        if !chunks.iter().any(|c| &c.kind == b"iCCP") {
-            r.reduce_gray();
-        }
-        let depth = if r.sixteen {
-            png::BitDepth::Sixteen
-        } else {
-            png::BitDepth::Eight
-        };
-        if let Some(b) = encode(
-            &r,
-            r.color_type(),
-            depth,
-            &r.data,
-            None,
-            png::Filter::Adaptive,
-        ) {
-            offer(with_chunks(b, &extra), "re-encoded (lossless)");
-        }
-        match exact_palette(&r) {
-            Some(ix) => {
-                if let Some(b) = encode_indexed(&r, &ix) {
-                    offer(with_chunks(b, &extra), "exact palette (lossless)");
-                }
-            }
-            None if palette && !r.sixteen && r.channels == 3 => {
-                if let Some(c) = crate::pdf::images::indexed_candidate(&r.data, r.width, r.height) {
-                    let ix = Indexed {
-                        palette: c.palette,
-                        trns: None,
-                        indices: c.indices,
-                    };
-                    if let Some(b) = encode_indexed(&r, &ix) {
-                        offer(with_chunks(b, &extra), "quantized palette (SSIM ≥ 0.9999)");
-                    }
-                }
-            }
-            None => {}
+        let gray_ok = !chunks.iter().any(|c| &c.kind == b"iCCP");
+        for (b, how) in encodings(r, gray_ok, palette) {
+            offer(with_chunks(b, &extra), how);
         }
     }
 
