@@ -13,7 +13,7 @@
 A fast command-line tool for PDF and image compression written in Rust.
 
 **Compress and merge** PDF files naturally and easily with this ready-to-use command line tool.
-**Compress JPEG and PNG images** in their own format (PNG stays lossless), mixed freely with PDFs in one command.
+**Compress JPEG, PNG and WebP images** in their own format (PNG and WebP stay lossless), mixed freely with PDFs in one command.
 **Convert images** (PNG, JPEG, WebP, GIF, TIFF, BMP) into ready-to-use pdfs.
 
 **~7× faster** than ghostscript (median, per-document on a 100-PDF corpus) and **~2× faster than single-threaded** rayon. Benchmarked in [`benches/docker/RESULTS.md`](benches/docker/RESULTS.md) — the headline figure is a median; best case is much higher, mean is lower.
@@ -21,7 +21,7 @@ A fast command-line tool for PDF and image compression written in Rust.
 ## Features
 
 - **Image recompression** — re-encodes images at a target quality, skipping CMYK images
-- **JPEG and PNG files** — `presse press` compresses them in their own format: JPEG re-encoding, lossless PNG optimization, metadata stripped except the ICC profile and EXIF orientation; the format is detected from the file's bytes, not its extension
+- **JPEG, PNG and WebP files** — `presse press` compresses them in their own format: JPEG re-encoding, lossless PNG and WebP optimization, metadata stripped except the ICC profile and EXIF orientation; the format is detected from the file's bytes, not its extension
 - **Engine optimizations** — rayon-parallel re-encoding, mimalloc allocator, zlib-rs deflate backend, memory-mapped reads, deduplicated identical image streams
 - **Structural compression** — object stream packing, xref stream compression
 - **Batch processing** — compress multiple files in one command via shell wildcards
@@ -106,7 +106,7 @@ presse press *.pdf -o compressed/
 presse press photo.jpg logo.png
 
 # PDFs and images in one command
-presse press *.pdf *.jpg *.png -o compressed/
+presse press *.pdf *.jpg *.png *.webp -o compressed/
 
 # Keep all image metadata (EXIF, XMP, comments, text chunks)
 presse press photo.jpg --keep-metadata
@@ -136,20 +136,20 @@ presse merge *.png *.pdf
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o, --output` | `<input>_compressed.<ext>` | Output file or directory (same format as the input) |
-| `-q, --quality` | `80` | Image recompression quality (0–100), for images inside PDFs and for JPEG files; PNG files stay lossless |
+| `-q, --quality` | `80` | Image recompression quality (0–100), for images inside PDFs and for JPEG files; PNG and WebP files stay lossless |
 | `-d, --dpi` | source resolution | Cap placed image resolution to DPI pixels/inch (75 screen, 150 ebook, 300 printer, 600 prepress); omitted = keep source resolution. PDFs only: image files ignore it, with one warning per run |
 | `-s, --ssim` | `1.0` | Target output fidelity as measured SSIM (calibrated on grainy scans — the worst case for JPEG — so smoother content exceeds the target); lower = smaller and faster. `1.0` = use `-q` as given |
 | `--palette` | `false` | Also build an `/Indexed` palette candidate for eligible flat-color images (figures, charts, scans) and keep the smallest of original / JPEG / indexed; exact palettes are lossless, lossy ones are gated on 0.9999 native SSIM. For PNG files: allows the lossy palette (exact palettes are always tried) |
-| `--keep-metadata` | `false` | JPEG/PNG files: keep all metadata. Default keeps only the ICC color profile and the EXIF orientation |
+| `--keep-metadata` | `false` | JPEG/PNG/WebP files: keep all metadata. Default keeps only the ICC color profile and the EXIF orientation |
 | `--jpeg-encoder` | `false` | Use the pure-Rust `jpeg-encoder` codec (YCbCr 4:2:0, box-averaged chroma — libjpeg's default model, which Ghostscript/qpdf use) instead of the `image` crate's 4:4:4 encoder; smaller RGB output at the same `-q`, faster, but opt-in because luminance-SSIM courts don't see chroma loss |
 | `--raster-classify` | `false` | Run the raster classifier on every decoded image: bitonal text/rules stored as a photographic RGB raster are re-stored as a 1-bit CCITT G4 opaque `DeviceGray` image (an RGB page → a few KB of G4). The G4 encoding of the 1-bit payload is lossless; the RGB→bitonal conversion itself is lossy, which is why only near-perfect black-and-white content is masked. Flat-color figures get the `/Indexed` palette candidate; photos and mixed pages are never masked. The smallest of original / JPEG / indexed / mask wins per image |
 | `--recompress-flate` | `false` | qpdf-style structural recompression: decode existing `/FlateDecode` streams and re-encode them at the writer's level 9, keeping each only when smaller. Lossless (no content-byte changes); recovers the compression-level gap form tools leave behind |
 | `-v, --verbose` | `false` | Print size comparison after each file |
 
-### Images — JPEG and PNG
+### Images — JPEG, PNG and WebP
 
-`presse press` detects each input from its first bytes: a JPEG or PNG
-signature means an image, anything else goes to the PDF pipeline (as
+`presse press` detects each input from its first bytes: a JPEG, PNG or
+WebP signature means an image, anything else goes to the PDF pipeline (as
 before). Images come back in their own format, named
 `<input>_compressed.<ext>`. For each image, presse builds candidates and
 keeps the smallest; when none is smaller than the input, the input is
@@ -166,11 +166,19 @@ copied unchanged.
   bits per pixel); everything is deflated at level 9. `--palette` also
   allows a lossy palette for opaque images with more colors, under the
   same 0.9999 SSIM gate as in PDFs. Animated PNGs are only stripped.
+- **WebP** — lossless only (presse has no lossy WebP encoder, so `-q`
+  does not apply): metadata removed, the image data copied as is; lossless
+  still images are also re-encoded with `image-webp` and the smaller file
+  wins. That encoder has fewer coding tools than libwebp, so the re-encode
+  only beats files from fast encoders (libwebp method 0); files from
+  libwebp's default settings are only stripped. Lossy and animated WebPs
+  are only stripped.
 - **Metadata** — kept: ICC profile, EXIF orientation (rewritten as a
   minimal EXIF block), and PNG color/pixel-size chunks. Removed: the rest
   of EXIF (camera, GPS, thumbnail), XMP, comments, Photoshop blocks, PNG
-  text and time chunks. `--keep-metadata` keeps everything.
-- **Not yet** — WebP, GIF, TIFF and BMP files are skipped with a message.
+  text and time chunks, unknown WebP chunks. `--keep-metadata` keeps
+  everything.
+- **Not yet** — GIF, TIFF and BMP files are skipped with a message.
   Flags that only apply to PDFs (`-d`, `--raster-classify`,
   `--recompress-flate`, the `optimize` passes, `--compression`) are
   ignored for images, with one warning per run, so a mixed batch never
@@ -181,6 +189,13 @@ data and the `webp` crate's test photo): JPEGs −37% to −62% (DSSIM
 0.0005–0.0017); PNGs pixel-identical, −2% to −43% on six files and
 unchanged on three that were already optimal. A poorly deflated synthetic
 PNG (the CI fixture) shrinks 98%.
+
+WebP, measured on 48 files made with libwebp from 12 of those images
+(lossless at methods 0, 4 and 6, lossy at q80), no metadata:
+pixel-identical; the four method-0 files that a re-encode beats shrink
+14% to 66%, the 44 others are copied unchanged. The same files carrying
+an ICC profile, camera EXIF and a 3.3 kB XMP packet shrink by the
+metadata (−3.4 kB on a 14 kB lossy photo), animated ones included.
 
 ### Resolution capping (`--dpi`)
 

@@ -6,6 +6,17 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **WebP files in `presse press`** — lossless only (no lossy WebP
+  encoder): the original with metadata removed (the image data copied as
+  is) vs, for lossless still images, an `image-webp` re-encode; the
+  smaller wins, the input is copied when neither is smaller. Same
+  metadata policy as JPEG/PNG (ICC profile and EXIF orientation kept,
+  EXIF rest, XMP and unknown chunks removed; `--keep-metadata` keeps
+  all); the VP8X header is rebuilt to match, or dropped when nothing needs
+  it. Lossy and animated files are only stripped. The re-encode only
+  beats fast encoders' output (libwebp method 0: −14% to −66% on 4 of 12
+  test images); libwebp's default output is only stripped.
+
 - **`presse convert` to JPEG, PNG and WebP** — the `-o` extension picks
   the output format (`.pdf`, `.jpg`, `.png`, `.webp`), else the new
   **`-t/--to`**, else PDF as before. JPEG goes through the PDF pipeline's
@@ -26,10 +37,10 @@ All notable changes to this project will be documented in this file.
   smallest candidate wins; when none beats the input, it is copied
   unchanged. Metadata: ICC profile and EXIF orientation kept, the rest
   removed; **`--keep-metadata`** keeps everything. PDF-only flags are
-  ignored for images with one warning per run. WebP/GIF/TIFF/BMP are
-  skipped for now. PDF output is byte-identical to before.
+  ignored for images with one warning per run. GIF/TIFF/BMP are skipped
+  for now. PDF output is byte-identical to before.
 - **Library entry point** — `presse::Presser::press(&[u8])` dispatches on
-  `presse::detect` (PDF, JPEG, PNG) and returns `presse::Pressed`.
+  `presse::detect` (PDF, JPEG, PNG, WebP) and returns `presse::Pressed`.
 
 - **`--jpeg-encoder`** (`press --jpeg-encoder`, off by default) — swap the
   CPU JPEG encoder from the `image` crate's 4:4:4 to the pure-Rust

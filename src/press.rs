@@ -2,9 +2,9 @@
 //! compressed in its own format.
 //!
 //! The format is detected from the content ([`crate::format::detect`]).
-//! JPEG and PNG are recognized by their signature; anything else goes down
-//! the PDF pipeline, exactly as `presse press` handled every input before
-//! images were supported.
+//! JPEG, PNG and WebP are compressed in their own format; GIF, TIFF and BMP
+//! are rejected; anything else goes down the PDF pipeline, exactly as
+//! `presse press` handled every input before images were supported.
 
 use lopdf::Document;
 
@@ -39,7 +39,7 @@ pub struct PdfOptions {
 /// Options for one run, shared by every file.
 #[derive(Debug, Clone, Copy)]
 pub struct PressOptions {
-    /// JPEG quality (PDF images and JPEG files; PNG stays lossless).
+    /// JPEG quality (PDF images and JPEG files; PNG and WebP stay lossless).
     pub quality: u8,
     /// `-s/--ssim` target; overrides `quality` when below 1.0.
     pub ssim: Option<f64>,
@@ -104,7 +104,8 @@ impl Presser {
             Some(Format::Png) => {
                 img::png::press(input, o.palette, o.keep_metadata, o.verbose).map(image)
             }
-            Some(f @ (Format::WebP | Format::Gif | Format::Tiff | Format::Bmp)) => {
+            Some(Format::WebP) => img::webp::press(input, o.keep_metadata, o.verbose).map(image),
+            Some(f @ (Format::Gif | Format::Tiff | Format::Bmp)) => {
                 Err(format!("{} compression is not supported yet", f.name()).into())
             }
             Some(Format::Pdf) | None => {

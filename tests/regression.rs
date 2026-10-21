@@ -4349,3 +4349,79 @@ fn convert_cli_carries_icc_and_orientation_and_warns_when_larger() {
     assert!(webp.windows(4).any(|w| w == b"ICCP"));
     assert!(webp.windows(icc.len()).any(|w| w == icc.as_slice()));
 }
+
+fn webp_chunk(tag: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut c = tag.to_vec();
+    c.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    c.extend_from_slice(data);
+    if data.len() % 2 == 1 {
+        c.push(0);
+    }
+    c
+}
+
+fn webp_file(chunks: &[Vec<u8>]) -> Vec<u8> {
+    let body = chunks.concat();
+    let mut out = b"RIFF".to_vec();
+    out.extend_from_slice(&(body.len() as u32 + 4).to_le_bytes());
+    out.extend_from_slice(b"WEBP");
+    out.extend_from_slice(&body);
+    out
+}
+
+#[test]
+fn press_cli_webp_strips_metadata_and_stays_lossless() {
+    use image::ImageDecoder;
+    let dir = test_dir().join("img-webp");
+    std::fs::create_dir_all(dir.join("out")).unwrap();
+    let (w, h) = (96, 64);
+    let figure = flat_figure_rgb(w, h);
+    let mut simple = Vec::new();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut simple)
+        .encode(&figure, w, h, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    assert_eq!(&simple[12..16], b"VP8L");
+    let size = u32::from_le_bytes(simple[16..20].try_into().unwrap()) as usize;
+    let vp8l = &simple[20..20 + size];
+
+    // VP8X with ICC + EXIF + XMP flags and the canvas size.
+    let mut vp8x = vec![0x20 | 0x08 | 0x04, 0, 0, 0];
+    vp8x.extend_from_slice(&(w - 1).to_le_bytes()[..3]);
+    vp8x.extend_from_slice(&(h - 1).to_le_bytes()[..3]);
+    let icc = fake_rgb_icc();
+    let input = webp_file(&[
+        webp_chunk(b"VP8X", &vp8x),
+        webp_chunk(b"ICCP", &icc),
+        webp_chunk(b"VP8L", vp8l),
+        webp_chunk(b"EXIF", &exif_with_make_and_orientation(6)),
+        webp_chunk(b"XMP ", b"<x:xmpmeta>secret</x:xmpmeta>"),
+    ]);
+    std::fs::write(dir.join("fig.webp"), &input).unwrap();
+
+    let status = Command::new(env!("CARGO_BIN_EXE_presse"))
+        .arg("press")
+        .arg(dir.join("fig.webp"))
+        .arg("-o")
+        .arg(format!("{}/", dir.join("out").display()))
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let out = std::fs::read(dir.join("out/fig_compressed.webp")).unwrap();
+    assert!(out.len() < input.len());
+    assert!(!out.windows(4).any(|x| x == b"CamX"), "camera EXIF removed");
+    assert!(!out.windows(6).any(|x| x == b"secret"), "XMP removed");
+    let mut decoder = image::ImageReader::new(std::io::Cursor::new(&out))
+        .with_guessed_format()
+        .unwrap()
+        .into_decoder()
+        .unwrap();
+    assert_eq!(decoder.icc_profile().unwrap(), Some(icc), "ICC kept");
+    assert_eq!(
+        decoder.orientation().unwrap(),
+        image::metadata::Orientation::Rotate90,
+        "orientation 6 kept"
+    );
+    let decoded = image::DynamicImage::from_decoder(decoder).unwrap();
+    assert_eq!(decoded.to_rgb8().into_raw(), figure, "lossless");
+}
