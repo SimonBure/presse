@@ -23,7 +23,7 @@ impl CompressionMode {
     // carries no behavior.)
 }
 
-/// Fast PDF compression tool - easier and faster than ghostscript
+/// Fast PDF and image compression tool - easier and faster than ghostscript
 #[derive(Parser)]
 #[command(name = "presse")]
 #[command(author, version, about, long_about = None)]
@@ -34,16 +34,18 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Compress one or several PDF documents
+    /// Compress PDF documents and JPEG/PNG images (format detected from content)
     Press {
-        /// Input file
+        /// Input files: PDF, JPEG or PNG, mixed freely
         input: Vec<PathBuf>,
 
-        /// Output file (optional, defaults to <input>_compressed.pdf)
+        /// Output file or directory (optional, defaults to
+        /// <input>_compressed.<ext>, same format as the input)
         #[arg(short, long)]
         output: Option<PathBuf>,
 
-        /// Target quality for lossy image compression
+        /// Target quality for lossy image compression (images inside PDFs
+        /// and JPEG files; PNG files stay lossless)
         #[arg(short, long, default_value_t = 80)]
         quality: u8,
 
@@ -99,7 +101,11 @@ median-cut and accepted only above a 0.9999 native-image SSIM gate, so a
 lossy palette can never visibly degrade the figure. Photos effectively
 never qualify and keep the JPEG path.
 
-Default (flag omitted): JPEG-only pipeline, current behavior."
+Default (flag omitted): JPEG-only pipeline, current behavior.
+
+PNG files: exact palettes (<=256 colors) are always tried because they are
+lossless. This flag also allows a lossy median-cut palette for opaque PNGs
+with more colors, under the same 0.9999 SSIM gate."
         )]
         palette: bool,
 
@@ -279,6 +285,12 @@ Default (flag omitted): JPEG-only pipeline, current behavior."
         )]
         compression: CompressionMode,
 
+        /// Keep all image metadata in JPEG/PNG files (EXIF, XMP, comments,
+        /// text chunks). Default: keep only the ICC color profile and the
+        /// EXIF orientation.
+        #[arg(long, default_value_t = false)]
+        keep_metadata: bool,
+
         // Details during the compression process --> sizes comparison before & after
         #[arg(short, long, default_value_t = false)]
         verbose: bool,
@@ -325,16 +337,26 @@ Default (flag omitted): JPEG-only pipeline, current behavior."
 }
 
 pub fn resolve_press_path_output(file_path: &Path, output: &Option<PathBuf>) -> PathBuf {
+    resolve_press_output(file_path, output, "pdf")
+}
+
+/// Like [`resolve_press_path_output`], for an output with the given
+/// extension (images keep their own format).
+pub fn resolve_press_output(
+    file_path: &Path,
+    output: &Option<PathBuf>,
+    extension: &str,
+) -> PathBuf {
     match output {
         Some(path) if path.is_dir() || path.to_str().unwrap().ends_with('/') => {
             let stem = file_path.file_stem().unwrap().to_str().unwrap();
-            path.join(format!("{}_compressed.pdf", stem))
+            path.join(format!("{}_compressed.{}", stem, extension))
         }
         Some(path) => path.clone(),
         None => {
             let stem = file_path.file_stem().unwrap().to_str().unwrap();
             let mut path = file_path.to_path_buf();
-            path.set_file_name(format!("{}_compressed.pdf", stem));
+            path.set_file_name(format!("{}_compressed.{}", stem, extension));
             path
         }
     }
