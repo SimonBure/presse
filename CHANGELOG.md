@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`presse convert` no longer overwrites files of the same run** — two
+  inputs with the same stem (`a.png a.bmp`, or `d1/a.png d2/a.png -o
+  out/`) used to write the same output, the second silently replacing
+  the first, and an output could land on a later input before it was
+  read (`a.png a.webp --to webp` destroyed `a.webp`). A name that is one
+  of the inputs or was already written by the run now gets `_1`, `_2`…
+  before the extension, with a warning, for PDF, merged and image
+  output. An output equal to its own input is written as `<stem>_1`
+  instead of skipped. Files are compared by identity, so `./`, symlinks
+  and letter case on case-insensitive disks cannot hide a clash. Other
+  existing files are still overwritten, so re-runs give the same names.
+
 ### Added
 
 - **WebP files in `presse press`** — lossless only (no lossy WebP
@@ -23,8 +37,8 @@ All notable changes to this project will be documented in this file.
   encoder at `-q`, PNG through the lossless optimizer, WebP is lossless.
   The ICC profile (when it matches the output's color model) and EXIF
   orientation are carried over; transparency becomes white in JPEG. A
-  larger result is written with a warning; an output that would overwrite
-  its input is skipped; `--merge` stays PDF-only. Library:
+  larger result is written with a warning; `--merge` stays PDF-only.
+  Library:
   `presse::convert_image`.
 
 - **JPEG and PNG files in `presse press`** — inputs are detected from

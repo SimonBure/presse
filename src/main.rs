@@ -322,7 +322,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     compress_images(&mut merged, quality, verbose);
                 }
 
-                let out = resolve_merge_path_output(&output, compress);
+                let out = Taken::new(&input).claim(&resolve_merge_path_output(&output, compress));
                 if compress {
                     compress_and_save_pdf(&mut merged, out.to_str().unwrap(), verbose)?;
                 } else {
@@ -339,6 +339,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
 
+                let mut taken = Taken::new(&input);
                 for path in &input {
                     let mut doc = match image_to_pdf(path, verbose) {
                         Ok(d) => d,
@@ -352,12 +353,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         compress_images(&mut doc, quality, verbose);
                     }
 
-                    let out = resolve_convert_path_output(path, &output);
+                    let out = taken.claim(&resolve_convert_path_output(path, &output));
                     if compress {
                         compress_and_save_pdf(&mut doc, out.to_str().unwrap(), verbose)?;
                     } else {
                         save_pdf(&mut doc, out.to_str().unwrap())?;
                     }
+                    taken.record(&out);
                 }
             }
         }
@@ -396,15 +398,8 @@ fn convert_to_images(
     }
     let kb = |n: usize| format!("{:.1} kB", n as f64 / 1000.0);
 
+    let mut taken = Taken::new(input);
     for path in input {
-        let out = resolve_convert_output(path, output, target.extension());
-        if same_file(path, &out) {
-            eprintln!(
-                "Skipping {}: the output would overwrite the input",
-                path.display()
-            );
-            continue;
-        }
         let converted = std::fs::read(path)
             .map_err(Into::into)
             .and_then(|source| convert_image(&source, target, quality).map(|c| (source, c)));
@@ -415,7 +410,9 @@ fn convert_to_images(
                 continue;
             }
         };
+        let out = taken.claim(&resolve_convert_output(path, output, target.extension()));
         std::fs::write(&out, &converted)?;
+        taken.record(&out);
         if converted.len() > source.len() {
             eprintln!(
                 "warning: {} ({}) is larger than {} ({})",
@@ -437,7 +434,86 @@ fn convert_to_images(
     Ok(())
 }
 
+/// Identifies an existing file whatever the path spelling (`./`, symlinks,
+/// letter case on case-insensitive disks).
+#[cfg(unix)]
+type FileId = (u64, u64);
+
+#[cfg(unix)]
+fn file_id(path: &Path) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.dev(), meta.ino()))
+}
+
+#[cfg(not(unix))]
+type FileId = std::path::PathBuf;
+
+#[cfg(not(unix))]
+fn file_id(path: &Path) -> Option<FileId> {
+    path.canonicalize().ok()
+}
+
 /// True when both paths name the same existing file.
 fn same_file(a: &Path, b: &Path) -> bool {
-    matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
+    file_id(a).is_some_and(|id| file_id(b) == Some(id))
+}
+
+/// Files a `convert` run must not write over: its inputs and the outputs it
+/// already wrote. Any other existing file is overwritten, as before, so a
+/// re-run produces the same names.
+struct Taken {
+    inputs: std::collections::HashSet<FileId>,
+    written: std::collections::HashSet<FileId>,
+}
+
+impl Taken {
+    fn new(inputs: &[std::path::PathBuf]) -> Self {
+        Self {
+            inputs: inputs.iter().filter_map(|p| file_id(p)).collect(),
+            written: Default::default(),
+        }
+    }
+
+    /// `wanted`, or when it is taken the first free `<stem>_1.<ext>`,
+    /// `<stem>_2.<ext>`… next to it.
+    fn claim(&self, wanted: &Path) -> std::path::PathBuf {
+        let free = |p: &Path| {
+            file_id(p).is_none_or(|id| !self.inputs.contains(&id) && !self.written.contains(&id))
+        };
+        if free(wanted) {
+            return wanted.to_path_buf();
+        }
+        let numbered = |n: u32| {
+            let mut name = wanted.file_stem().unwrap_or_default().to_os_string();
+            name.push(format!("_{n}"));
+            if let Some(ext) = wanted.extension() {
+                name.push(".");
+                name.push(ext);
+            }
+            wanted.with_file_name(name)
+        };
+        let out = (1..)
+            .map(numbered)
+            .find(|p| free(p))
+            .expect("some numbered name is free");
+        let why = if file_id(wanted).is_some_and(|id| self.inputs.contains(&id)) {
+            "is one of the inputs"
+        } else {
+            "was already written by this run"
+        };
+        eprintln!(
+            "warning: {} {why}; writing {} instead",
+            wanted.display(),
+            out.display()
+        );
+        out
+    }
+
+    /// Mark a file this run just wrote.
+    fn record(&mut self, written: &Path) {
+        if let Some(id) = file_id(written) {
+            self.written.insert(id);
+        }
+    }
 }
