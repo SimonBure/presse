@@ -4287,11 +4287,84 @@ fn convert_cli_rejects_conflicts_and_never_overwrites_inputs() {
     ]);
     assert!(!merge.status.success());
 
-    // g.png --to png would write g.png itself: skipped, input untouched.
+    // g.png --to png would write g.png itself: written as g_1.png instead.
     let same = presse_convert(&[g.as_os_str(), "--to".as_ref(), "png".as_ref()]);
     assert!(same.status.success());
-    assert!(String::from_utf8_lossy(&same.stderr).contains("would overwrite the input"));
+    assert!(String::from_utf8_lossy(&same.stderr).contains("is one of the inputs"));
     assert_eq!(std::fs::read(&g).unwrap(), src);
+    let g1 = image::open(dir.join("g_1.png")).unwrap().to_rgb8();
+    assert_eq!(g1.into_raw(), figure);
+}
+
+/// Width of the first image placed in a PDF.
+fn pdf_image_width(pdf: &Path) -> i64 {
+    let doc = Document::load(pdf).unwrap();
+    find_image_streams(&doc)[0]
+        .2
+        .get(b"Width")
+        .unwrap()
+        .as_i64()
+        .unwrap()
+}
+
+#[test]
+fn convert_cli_numbers_clashing_names_and_never_overwrites_inputs() {
+    let dir = test_dir().join("conv-names");
+    let _ = std::fs::remove_dir_all(&dir);
+    for sub in ["d1", "d2", "same", "out"] {
+        std::fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    let solid = |w: u32| image::RgbImage::from_pixel(w, w, image::Rgb([w as u8, 0, 0]));
+    solid(10).save(dir.join("d1/a.png")).unwrap();
+    solid(20).save(dir.join("d2/a.png")).unwrap();
+    solid(30).save(dir.join("same/a.png")).unwrap();
+    solid(40).save(dir.join("same/a.bmp")).unwrap();
+    let path = |p: &str| dir.join(p).into_os_string();
+
+    // Same stem from two directories into one -o directory; a re-run
+    // overwrites its own outputs instead of numbering further.
+    for _ in 0..2 {
+        let run = presse_convert(&[
+            &path("d1/a.png"),
+            &path("d2/a.png"),
+            "-o".as_ref(),
+            &path("out/"),
+        ]);
+        assert!(run.status.success());
+        assert!(String::from_utf8_lossy(&run.stderr).contains("was already written by this run"));
+    }
+    let mut names: Vec<_> = std::fs::read_dir(dir.join("out"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["a.pdf", "a_1.pdf"]);
+    assert_eq!(pdf_image_width(&dir.join("out/a.pdf")), 10);
+    assert_eq!(pdf_image_width(&dir.join("out/a_1.pdf")), 20);
+
+    // Same stem, same directory, no -o: a.pdf, a_1.pdf, in input order.
+    let run = presse_convert(&[&path("same/a.png"), &path("same/a.bmp")]);
+    assert!(run.status.success());
+    assert_eq!(pdf_image_width(&dir.join("same/a.pdf")), 30);
+    assert_eq!(pdf_image_width(&dir.join("same/a_1.pdf")), 40);
+
+    // a.png --to webp would land on the input a.webp, which is read later:
+    // a.webp stays untouched, its own conversion goes to a_2.webp.
+    let mut webp = Vec::new();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut webp)
+        .encode(solid(50).as_raw(), 50, 50, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    std::fs::write(dir.join("same/a.webp"), &webp).unwrap();
+    let run = presse_convert(&[
+        &path("same/a.png"),
+        &path("same/a.webp"),
+        "-t".as_ref(),
+        "webp".as_ref(),
+    ]);
+    assert!(run.status.success());
+    assert_eq!(std::fs::read(dir.join("same/a.webp")).unwrap(), webp);
+    assert_eq!(image::open(dir.join("same/a_1.webp")).unwrap().width(), 30);
+    assert_eq!(image::open(dir.join("same/a_2.webp")).unwrap().width(), 50);
 }
 
 #[test]

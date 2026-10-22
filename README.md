@@ -451,9 +451,15 @@ output's color model, e.g. a CMYK profile on RGB pixels); other metadata
 is not carried. Transparent areas become white in JPEG. Animated inputs
 keep their first frame. When the result is larger than the input (a photo
 JPEG as lossless WebP or PNG usually is), it is written anyway with a
-warning. An output that would overwrite its own input is skipped.
-`-o` with an unknown extension, or one that disagrees with `--to`, is an
-error.
+warning. `-o` with an unknown extension, or one that disagrees with
+`--to`, is an error.
+
+`convert` never writes over one of its inputs or over a file it already
+wrote in the same run: the clashing output gets `_1`, `_2`… before its
+extension, with a warning. `convert a.png a.bmp` writes `a.pdf` and
+`a_1.pdf`; `convert a.png a.webp --to webp` keeps `a.webp` and writes
+`a_1.webp` and `a_2.webp`. Other existing files are overwritten as before,
+so running the same command twice gives the same file names.
 
 ## GPU acceleration (experimental)
 
