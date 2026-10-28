@@ -6,17 +6,21 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
-- **`presse convert` no longer overwrites files of the same run** — two
-  inputs with the same stem (`a.png a.bmp`, or `d1/a.png d2/a.png -o
-  out/`) used to write the same output, the second silently replacing
-  the first, and an output could land on a later input before it was
-  read (`a.png a.webp --to webp` destroyed `a.webp`). A name that is one
-  of the inputs or was already written by the run now gets `_1`, `_2`…
-  before the extension, with a warning, for PDF, merged and image
-  output. An output equal to its own input is written as `<stem>_1`
+- **`presse press` and `presse convert` no longer overwrite files of the
+  same run** — two inputs with the same stem (`a.png a.bmp`, or
+  `d1/a.pdf d2/a.pdf -o out/`) used to write the same output, the second
+  silently replacing the first, and an output could land on a later input
+  before it was read (`press a.pdf a_compressed.pdf`, `convert a.png
+  a.webp --to webp`). A name that is another input or was already written
+  by the run now gets `_1`, `_2`… before the extension, with a warning.
+  `press -o` naming the input itself still compresses in place; in
+  `convert`, an output equal to its own input is written as `<stem>_1`
   instead of skipped. Files are compared by identity, so `./`, symlinks
   and letter case on case-insensitive disks cannot hide a clash. Other
   existing files are still overwritten, so re-runs give the same names.
+- **`presse convert` and `presse merge` create missing `-o` directories**,
+  as `presse press` already did, instead of failing with "No such file or
+  directory".
 
 ### Added
 

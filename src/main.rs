@@ -161,19 +161,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
 
-            // Create output dir if needed (once)
-            if let Some(ref path) = output {
-                if let Some(parent) = path.parent()
-                    && !parent.as_os_str().is_empty()
-                {
-                    std::fs::create_dir_all(parent)?;
-                }
-                // If -o is a directory itself (ends with /)
-                if path.to_str().unwrap().ends_with('/') {
-                    std::fs::create_dir_all(path)?;
-                }
-            }
+            create_output_dirs(&output)?;
 
+            let mut taken = Taken::new(&input);
             for file_path in &input {
                 let data = match map_file(file_path) {
                     Ok(data) => data,
@@ -220,6 +210,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     None => resolve_press_path_output(file_path, &output),
                 };
+                // Writing over the file's own input is in-place compression.
+                let output = taken.claim(&output, Some(file_path));
                 let kept = match pressed {
                     Pressed::Pdf(mut doc) => {
                         compress_and_save_pdf(&mut doc, output.to_str().unwrap(), verbose)?;
@@ -236,6 +228,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Some(reason)
                     }
                 };
+                taken.record(&output);
 
                 // Compression summary
                 if verbose {
@@ -265,6 +258,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output,
             compress,
         } => {
+            create_output_dirs(&output)?;
             let mut documents = Vec::new();
             for path in &input {
                 match load_input_as_pdf(path, false) {
@@ -322,7 +316,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     compress_images(&mut merged, quality, verbose);
                 }
 
-                let out = Taken::new(&input).claim(&resolve_merge_path_output(&output, compress));
+                create_output_dirs(&output)?;
+                let out =
+                    Taken::new(&input).claim(&resolve_merge_path_output(&output, compress), None);
                 if compress {
                     compress_and_save_pdf(&mut merged, out.to_str().unwrap(), verbose)?;
                 } else {
@@ -338,6 +334,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("Error: -o must be a directory when converting multiple images");
                     std::process::exit(1);
                 }
+                create_output_dirs(&output)?;
 
                 let mut taken = Taken::new(&input);
                 for path in &input {
@@ -353,7 +350,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         compress_images(&mut doc, quality, verbose);
                     }
 
-                    let out = taken.claim(&resolve_convert_path_output(path, &output));
+                    let out = taken.claim(&resolve_convert_path_output(path, &output), None);
                     if compress {
                         compress_and_save_pdf(&mut doc, out.to_str().unwrap(), verbose)?;
                     } else {
@@ -396,6 +393,7 @@ fn convert_to_images(
         eprintln!("Error: -o must be a directory when converting multiple images");
         std::process::exit(1);
     }
+    create_output_dirs(output)?;
     let kb = |n: usize| format!("{:.1} kB", n as f64 / 1000.0);
 
     let mut taken = Taken::new(input);
@@ -410,7 +408,10 @@ fn convert_to_images(
                 continue;
             }
         };
-        let out = taken.claim(&resolve_convert_output(path, output, target.extension()));
+        let out = taken.claim(
+            &resolve_convert_output(path, output, target.extension()),
+            None,
+        );
         std::fs::write(&out, &converted)?;
         taken.record(&out);
         if converted.len() > source.len() {
@@ -430,6 +431,22 @@ fn convert_to_images(
             kb(source.len()),
             kb(converted.len())
         );
+    }
+    Ok(())
+}
+
+/// Create the directories `-o` needs: its parent, and the path itself when
+/// it ends with `/`.
+fn create_output_dirs(output: &Option<std::path::PathBuf>) -> std::io::Result<()> {
+    if let Some(path) = output {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        if path.to_str().unwrap().ends_with('/') {
+            std::fs::create_dir_all(path)?;
+        }
     }
     Ok(())
 }
@@ -459,9 +476,9 @@ fn same_file(a: &Path, b: &Path) -> bool {
     file_id(a).is_some_and(|id| file_id(b) == Some(id))
 }
 
-/// Files a `convert` run must not write over: its inputs and the outputs it
-/// already wrote. Any other existing file is overwritten, as before, so a
-/// re-run produces the same names.
+/// Files a `press` or `convert` run must not write over: its inputs and the
+/// outputs it already wrote. Any other existing file is overwritten, as
+/// before, so a re-run produces the same names.
 struct Taken {
     inputs: std::collections::HashSet<FileId>,
     written: std::collections::HashSet<FileId>,
@@ -476,10 +493,15 @@ impl Taken {
     }
 
     /// `wanted`, or when it is taken the first free `<stem>_1.<ext>`,
-    /// `<stem>_2.<ext>`… next to it.
-    fn claim(&self, wanted: &Path) -> std::path::PathBuf {
+    /// `<stem>_2.<ext>`… next to it. `own_input` may be written over
+    /// (`press` compressing a file in place).
+    fn claim(&self, wanted: &Path, own_input: Option<&Path>) -> std::path::PathBuf {
+        let own = own_input.and_then(file_id);
         let free = |p: &Path| {
-            file_id(p).is_none_or(|id| !self.inputs.contains(&id) && !self.written.contains(&id))
+            file_id(p).is_none_or(|id| {
+                own.as_ref() == Some(&id)
+                    || (!self.inputs.contains(&id) && !self.written.contains(&id))
+            })
         };
         if free(wanted) {
             return wanted.to_path_buf();
