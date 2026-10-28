@@ -31,6 +31,22 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **ZIP-based documents in `presse press`** — ODF (ODT, ODS, ODP…), Office
+  Open XML (DOCX, XLSX, PPTX), EPUB, CBZ and plain ZIP, detected by
+  content and kept in their own format. The archive is rebuilt with the
+  same entries in the same order: images through the image pipeline, PDFs
+  through the PDF pipeline, nested archives recursively (3 levels); other
+  content byte for byte. Each entry keeps the smallest of its original
+  bytes, stored, or deflate level 9; `mimetype` stays first and stored.
+  ZIP extra fields are removed except Unicode names (`--keep-metadata`
+  keeps them). Signed documents (ODF/OOXML/EPUB/JAR signatures, APK
+  signing block), encrypted, ZIP64, multi-disk and self-extracting
+  archives are left untouched with a message. Decompression is bounded
+  (256 MiB per entry, 2 GiB per file, 3 nesting levels). Our own ZIP reader and
+  writer: no new crate. PDF-only flags apply to PDFs inside archives.
+  Library: `Pressed::Image` is now `Pressed::Bytes`, and
+  `presse::pdf::writer::write_compressed_pdf` writes to any `Write`.
+
 - **WebP files in `presse press`** — lossless only (no lossy WebP
   encoder): the original with metadata removed (the image data copied as
   is) vs, for lossless still images, an `image-webp` re-encode; the

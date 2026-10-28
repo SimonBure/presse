@@ -15,11 +15,16 @@ Each fixture targets one structure presse handles differently:
   predictor      FlateDecode + /DecodeParms PNG predictor  (see issue #6)
   gapped         gapped object numbering        (xref section handling)
   multipage      several pages, mixed content
+  doc.odt        ZIP-based document: mimetype, XML, a PNG  (`press` on archives)
+  pdfs.zip       ZIP holding PDFs                          (PDFs inside archives)
+  signed.odt     signed ZIP-based document                 (must stay untouched)
 
 Usage: make_fixtures.py <out-dir>
 """
 
+import io
 import sys
+import zipfile
 import zlib
 from pathlib import Path
 
@@ -221,6 +226,18 @@ def png(w, h, raw_rgb):
             + chunk(b"IEND", b""))
 
 
+def zip_bytes(files):
+    """A ZIP of (name, data, deflate), written by Python's zipfile at
+    deflate level 1 with a fixed timestamp (deterministic)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name, data, deflate in files:
+            info = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED if deflate else zipfile.ZIP_STORED
+            z.writestr(info, data, compresslevel=1)
+    return buf.getvalue()
+
+
 def main(outdir):
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
@@ -264,6 +281,24 @@ def main(outdir):
     fixtures["gapped.pdf"] = p.build(root)
 
     fixtures["source.png"] = png(W, H, rgb_pixels(W, H))
+
+    mimetype = b"application/vnd.oasis.opendocument.text"
+    xml = b"<office:text>presse keeps XML byte for byte</office:text>" * 40
+    fixtures["doc.odt"] = zip_bytes([
+        ("mimetype", mimetype, False),
+        ("content.xml", xml, True),
+        ("Pictures/figure.png", fixtures["source.png"], False),
+        ("META-INF/manifest.xml", b"<manifest:manifest/>", True),
+    ])
+    fixtures["pdfs.zip"] = zip_bytes([
+        ("rgb-flate.pdf", fixtures["rgb-flate.pdf"], False),
+        ("multipage.pdf", fixtures["multipage.pdf"], False),
+    ])
+    fixtures["signed.odt"] = zip_bytes([
+        ("mimetype", mimetype, False),
+        ("content.xml", xml, False),
+        ("META-INF/documentsignatures.xml", b"<signatures/>", False),
+    ])
 
     for name, data in sorted(fixtures.items()):
         (out / name).write_bytes(data)

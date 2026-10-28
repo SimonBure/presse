@@ -57,9 +57,10 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Compress PDF documents and JPEG/PNG/WebP images (format detected from content)
+    /// Compress PDFs, JPEG/PNG/WebP images and ZIP-based documents (ODT, DOCX, EPUB…), format detected from content
     Press {
-        /// Input files: PDF, JPEG, PNG or WebP, mixed freely
+        /// Input files: PDF, JPEG, PNG, WebP or ZIP-based (ODT, DOCX, XLSX,
+        /// PPTX, EPUB, CBZ, ZIP…), mixed freely
         input: Vec<PathBuf>,
 
         /// Output file or directory (optional, defaults to

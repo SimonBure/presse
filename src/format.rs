@@ -10,6 +10,8 @@ pub enum Format {
     Gif,
     Tiff,
     Bmp,
+    /// A ZIP archive, including ZIP-based documents (ODF, OOXML, EPUB…).
+    Zip,
 }
 
 impl Format {
@@ -23,6 +25,7 @@ impl Format {
             Format::Gif => "gif",
             Format::Tiff => "tiff",
             Format::Bmp => "bmp",
+            Format::Zip => "zip",
         }
     }
 
@@ -36,6 +39,7 @@ impl Format {
             Format::Gif => "GIF",
             Format::Tiff => "TIFF",
             Format::Bmp => "BMP",
+            Format::Zip => "ZIP",
         }
     }
 }
@@ -64,6 +68,11 @@ pub fn detect(bytes: &[u8]) -> Option<Format> {
     if image.is_some() {
         return image;
     }
+    // A ZIP starts with a local file header (APPNOTE 4.3.7). Checked before
+    // the PDF window: an archive of PDFs carries `%PDF-` in its first KiB.
+    if bytes.starts_with(b"PK\x03\x04") {
+        return Some(Format::Zip);
+    }
     let window = &bytes[..bytes.len().min(PDF_HEADER_WINDOW)];
     window
         .windows(5)
@@ -82,6 +91,7 @@ mod tests {
         assert_eq!(detect(&[0xFF, 0xD8, 0xFF, 0xE0]), Some(Format::Jpeg));
         assert_eq!(detect(b"\x89PNG\r\n\x1a\n...."), Some(Format::Png));
         assert_eq!(detect(b"RIFF\0\0\0\0WEBPVP8 "), Some(Format::WebP));
+        assert_eq!(detect(b"PK\x03\x04 ... %PDF-1.7"), Some(Format::Zip));
         assert_eq!(detect(b"plain text"), None);
         assert_eq!(detect(b""), None);
     }

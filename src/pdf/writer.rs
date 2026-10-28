@@ -157,6 +157,29 @@ pub fn compress_and_save_pdf(
     name: &str,
     verbose: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let option = prepare_compressed(doc, verbose);
+    verbose!(verbose, "[writer] saving to '{}'", name);
+    let mut file = File::create(name)?;
+    doc.save_with_options(&mut file, option)
+        .map_err(|e| format!("save_with_options failed for '{}': {}", name, e))?;
+
+    Ok(())
+}
+
+/// [`compress_and_save_pdf`] to any writer (an archive entry, a buffer).
+pub fn write_compressed_pdf<W: std::io::Write>(
+    doc: &mut Document,
+    target: &mut W,
+    verbose: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let option = prepare_compressed(doc, verbose);
+    doc.save_with_options(target, option)?;
+    Ok(())
+}
+
+/// Cleanup, renumbering and stream compression before a compressed save;
+/// returns the save options.
+fn prepare_compressed(doc: &mut Document, verbose: bool) -> SaveOptions {
     let option: SaveOptions = SaveOptions::builder()
         .use_object_streams(true)
         .use_xref_streams(true)
@@ -186,13 +209,7 @@ pub fn compress_and_save_pdf(
     renumber_objects(doc);
 
     doc.compress();
-
-    verbose!(verbose, "[writer] saving to '{}'", name);
-    let mut file = File::create(name)?;
-    doc.save_with_options(&mut file, option)
-        .map_err(|e| format!("save_with_options failed for '{}': {}", name, e))?;
-
-    Ok(())
+    option
 }
 
 pub fn save_pdf(doc: &mut Document, name: &str) -> Result<(), Box<dyn std::error::Error>> {

@@ -23,6 +23,7 @@ pub fn convert_image(
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     match detect(input) {
         Some(Format::Pdf) => return Err("converting a PDF to an image is not supported".into()),
+        Some(Format::Zip) => return Err("a ZIP archive is not an image".into()),
         None => return Err("not a recognized image".into()),
         Some(_) => {}
     }

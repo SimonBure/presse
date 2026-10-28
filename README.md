@@ -14,6 +14,7 @@ A fast command-line tool for PDF and image compression written in Rust.
 
 **Compress and merge** PDF files naturally and easily with this ready-to-use command line tool.
 **Compress JPEG, PNG and WebP images** in their own format (PNG and WebP stay lossless), mixed freely with PDFs in one command.
+**Compress ZIP-based documents** (ODT, ODS, ODP, DOCX, XLSX, PPTX, EPUB, CBZ, ZIP) by compressing the images and PDFs inside them.
 **Convert images** (PNG, JPEG, WebP, GIF, TIFF, BMP) into ready-to-use pdfs.
 
 **~7× faster** than ghostscript (median, per-document on a 100-PDF corpus) and **~2× faster than single-threaded** rayon. Benchmarked in [`benches/docker/RESULTS.md`](benches/docker/RESULTS.md) — the headline figure is a median; best case is much higher, mean is lower.
@@ -22,6 +23,7 @@ A fast command-line tool for PDF and image compression written in Rust.
 
 - **Image recompression** — re-encodes images at a target quality, skipping CMYK images
 - **JPEG, PNG and WebP files** — `presse press` compresses them in their own format: JPEG re-encoding, lossless PNG and WebP optimization, metadata stripped except the ICC profile and EXIF orientation; the format is detected from the file's bytes, not its extension
+- **ZIP-based documents** — `presse press` rebuilds ODF, Office Open XML, EPUB, CBZ and ZIP files with their images and PDFs compressed and every entry stored at its smallest; text and XML stay byte for byte; signed documents are left untouched
 - **Engine optimizations** — rayon-parallel re-encoding, mimalloc allocator, zlib-rs deflate backend, memory-mapped reads, deduplicated identical image streams
 - **Structural compression** — object stream packing, xref stream compression
 - **Batch processing** — compress multiple files in one command via shell wildcards
@@ -107,6 +109,9 @@ presse press photo.jpg logo.png
 
 # PDFs and images in one command
 presse press *.pdf *.jpg *.png *.webp -o compressed/
+
+# Documents keep their format — outputs report_compressed.odt, slides_compressed.pptx
+presse press report.odt slides.pptx
 
 # Keep all image metadata (EXIF, XMP, comments, text chunks)
 presse press photo.jpg --keep-metadata
@@ -209,6 +214,38 @@ pixel-identical; the four method-0 files that a re-encode beats shrink
 14% to 66%, the 44 others are copied unchanged. The same files carrying
 an ICC profile, camera EXIF and a 3.3 kB XMP packet shrink by the
 metadata (−3.4 kB on a 14 kB lossy photo), animated ones included.
+
+### Documents — ODT, DOCX, EPUB and other ZIP-based files
+
+OpenDocument (ODT, ODS, ODP…), Office Open XML (DOCX, XLSX, PPTX), EPUB,
+CBZ and plain ZIP files are detected by their bytes and come back in
+their own format, `<input>_compressed.<ext>`. The archive is rebuilt with
+the same entries in the same order:
+
+- **Contents** — JPEG, PNG and WebP images go through the image pipeline
+  above (same `-q`, `-s`, `--palette`, `--keep-metadata`: JPEGs are
+  re-encoded at q80 by default), PDFs through the PDF pipeline (with its
+  flags, `-d` included), nested archives recursively (3 levels). Text,
+  XML, fonts and everything else keep their content byte for byte.
+- **Storage** — each entry keeps the smallest of its original compressed
+  bytes, uncompressed, or deflate level 9. ODF and EPUB's `mimetype` entry
+  stays first and uncompressed, as both formats require.
+- **Metadata** — names, timestamps, attributes and comments are kept;
+  ZIP extra fields (extended timestamps, Unix owners) are removed except
+  Unicode names; `--keep-metadata` keeps them.
+- **Left untouched**, with a message — signed documents (ODF, OOXML, EPUB
+  and JAR signatures, APK signing block), since any change breaks the
+  signature; encrypted, ZIP64, multi-disk and self-extracting archives.
+  Entries over 256 MiB, and anything past 2 GiB of decompressed content
+  per file (nested archives included), are copied as is.
+
+Measured on documents written by LibreOffice (ODT, DOCX, ODS, XLSX) and
+pandoc (EPUB) with 7 photos and screenshots: ODT −43.0%, DOCX −43.4%,
+EPUB −43.5% — almost all from the JPEG re-encode; deflating the entries
+alone gives 0–1%. Spreadsheets without images: −1.7% (ODS), −3.4% (XLSX).
+A CBZ of 3 JPEG pages: −51%; a ZIP of 3 PDFs: −78%. Every output reads
+back with Python's `zipfile` and `unzip -t`; LibreOffice opens the
+documents with the same page count (spreadsheets render pixel-identical).
 
 ### Resolution capping (`--dpi`)
 
