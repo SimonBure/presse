@@ -146,6 +146,14 @@ presse merge *.png *.pdf
 | `--recompress-flate` | `false` | qpdf-style structural recompression: decode existing `/FlateDecode` streams and re-encode them at the writer's level 9, keeping each only when smaller. Lossless (no content-byte changes); recovers the compression-level gap form tools leave behind |
 | `-v, --verbose` | `false` | Print size comparison after each file |
 
+**Output names.** Missing `-o` directories are created. A run never writes
+over another of its inputs or over a file it already wrote: the clashing
+output gets `_1`, `_2`… before its extension, with a warning
+(`presse press d1/a.pdf d2/a.pdf -o out/` writes `a_compressed.pdf` and
+`a_compressed_1.pdf`). `-o` naming the input itself compresses it in
+place. Other existing files are overwritten as before, so running the
+same command twice gives the same file names.
+
 ### Images — JPEG, PNG and WebP
 
 `presse press` detects each input from its first bytes: a JPEG, PNG or
@@ -454,12 +462,11 @@ JPEG as lossless WebP or PNG usually is), it is written anyway with a
 warning. `-o` with an unknown extension, or one that disagrees with
 `--to`, is an error.
 
-`convert` never writes over one of its inputs or over a file it already
-wrote in the same run: the clashing output gets `_1`, `_2`… before its
-extension, with a warning. `convert a.png a.bmp` writes `a.pdf` and
-`a_1.pdf`; `convert a.png a.webp --to webp` keeps `a.webp` and writes
-`a_1.webp` and `a_2.webp`. Other existing files are overwritten as before,
-so running the same command twice gives the same file names.
+Output names follow the `press` rules (missing `-o` directories are
+created; a clash with an input or an earlier output gets `_1`, `_2`…),
+except that an output never replaces even its own input: `convert a.png
+a.bmp` writes `a.pdf` and `a_1.pdf`; `convert a.png a.webp --to webp`
+keeps `a.webp` and writes `a_1.webp` and `a_2.webp`.
 
 ## GPU acceleration (experimental)
 

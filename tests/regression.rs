@@ -4311,7 +4311,7 @@ fn pdf_image_width(pdf: &Path) -> i64 {
 fn convert_cli_numbers_clashing_names_and_never_overwrites_inputs() {
     let dir = test_dir().join("conv-names");
     let _ = std::fs::remove_dir_all(&dir);
-    for sub in ["d1", "d2", "same", "out"] {
+    for sub in ["d1", "d2", "same"] {
         std::fs::create_dir_all(dir.join(sub)).unwrap();
     }
     let solid = |w: u32| image::RgbImage::from_pixel(w, w, image::Rgb([w as u8, 0, 0]));
@@ -4321,26 +4321,40 @@ fn convert_cli_numbers_clashing_names_and_never_overwrites_inputs() {
     solid(40).save(dir.join("same/a.bmp")).unwrap();
     let path = |p: &str| dir.join(p).into_os_string();
 
-    // Same stem from two directories into one -o directory; a re-run
-    // overwrites its own outputs instead of numbering further.
+    // Same stem from two directories into one -o directory, created on the
+    // fly; a re-run overwrites its own outputs instead of numbering further.
     for _ in 0..2 {
         let run = presse_convert(&[
             &path("d1/a.png"),
             &path("d2/a.png"),
             "-o".as_ref(),
-            &path("out/"),
+            &path("out/new/"),
         ]);
         assert!(run.status.success());
         assert!(String::from_utf8_lossy(&run.stderr).contains("was already written by this run"));
     }
-    let mut names: Vec<_> = std::fs::read_dir(dir.join("out"))
+    let mut names: Vec<_> = std::fs::read_dir(dir.join("out/new"))
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
     names.sort();
     assert_eq!(names, ["a.pdf", "a_1.pdf"]);
-    assert_eq!(pdf_image_width(&dir.join("out/a.pdf")), 10);
-    assert_eq!(pdf_image_width(&dir.join("out/a_1.pdf")), 20);
+    assert_eq!(pdf_image_width(&dir.join("out/new/a.pdf")), 10);
+    assert_eq!(pdf_image_width(&dir.join("out/new/a_1.pdf")), 20);
+
+    // Missing -o directories are created for merged and image output too.
+    let run = presse_convert(&[
+        &path("d1/a.png"),
+        &path("d2/a.png"),
+        "-m".as_ref(),
+        "-o".as_ref(),
+        &path("out/merged/all.pdf"),
+    ]);
+    assert!(run.status.success());
+    assert!(dir.join("out/merged/all.pdf").is_file());
+    let run = presse_convert(&[&path("d1/a.png"), "-o".as_ref(), &path("out/img/x.webp")]);
+    assert!(run.status.success());
+    assert!(dir.join("out/img/x.webp").is_file());
 
     // Same stem, same directory, no -o: a.pdf, a_1.pdf, in input order.
     let run = presse_convert(&[&path("same/a.png"), &path("same/a.bmp")]);
@@ -4497,4 +4511,98 @@ fn press_cli_webp_strips_metadata_and_stays_lossless() {
     );
     let decoded = image::DynamicImage::from_decoder(decoder).unwrap();
     assert_eq!(decoded.to_rgb8().into_raw(), figure, "lossless");
+}
+
+fn pdf_with_pages(path: &Path, pages: usize) {
+    let (mut doc, pages_id) = new_doc();
+    for _ in 0..pages {
+        add_image_page(&mut doc, pages_id, photoish_rgb(64, 64), 64, 64, false);
+    }
+    save_pdf(&mut doc, path.to_str().unwrap()).unwrap();
+}
+
+fn page_count(pdf: &Path) -> usize {
+    Document::load(pdf).unwrap().get_pages().len()
+}
+
+#[test]
+fn press_cli_numbers_clashing_names_and_still_works_in_place() {
+    let dir = test_dir().join("press-names");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("d1")).unwrap();
+    std::fs::create_dir_all(dir.join("d2")).unwrap();
+    pdf_with_pages(&dir.join("d1/a.pdf"), 1);
+    pdf_with_pages(&dir.join("d2/a.pdf"), 2);
+    let press = |args: &[&std::ffi::OsStr]| {
+        Command::new(env!("CARGO_BIN_EXE_presse"))
+            .arg("press")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let path = |p: &str| dir.join(p).into_os_string();
+
+    // Same stem from two directories into a -o directory that does not
+    // exist yet; a re-run overwrites its own outputs.
+    for _ in 0..2 {
+        let run = press(&[
+            &path("d1/a.pdf"),
+            &path("d2/a.pdf"),
+            "-o".as_ref(),
+            &path("out/new/"),
+        ]);
+        assert!(run.status.success());
+        assert!(String::from_utf8_lossy(&run.stderr).contains("was already written by this run"));
+    }
+    let mut names: Vec<_> = std::fs::read_dir(dir.join("out/new"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["a_compressed.pdf", "a_compressed_1.pdf"]);
+    assert_eq!(page_count(&dir.join("out/new/a_compressed.pdf")), 1);
+    assert_eq!(page_count(&dir.join("out/new/a_compressed_1.pdf")), 2);
+
+    // a.pdf's default output is the next input: that input stays untouched.
+    std::fs::copy(dir.join("d2/a.pdf"), dir.join("d1/a_compressed.pdf")).unwrap();
+    let before = std::fs::read(dir.join("d1/a_compressed.pdf")).unwrap();
+    let run = press(&[&path("d1/a.pdf"), &path("d1/a_compressed.pdf")]);
+    assert!(run.status.success());
+    assert!(String::from_utf8_lossy(&run.stderr).contains("is one of the inputs"));
+    assert_eq!(
+        std::fs::read(dir.join("d1/a_compressed.pdf")).unwrap(),
+        before
+    );
+    assert_eq!(page_count(&dir.join("d1/a_compressed_1.pdf")), 1);
+    assert_eq!(page_count(&dir.join("d1/a_compressed_compressed.pdf")), 2);
+
+    // -o naming the input itself is in-place compression, not a clash.
+    std::fs::copy(dir.join("d2/a.pdf"), dir.join("inplace.pdf")).unwrap();
+    let size = std::fs::metadata(dir.join("inplace.pdf")).unwrap().len();
+    let run = press(&[&path("inplace.pdf"), "-o".as_ref(), &path("inplace.pdf")]);
+    assert!(run.status.success());
+    assert!(!String::from_utf8_lossy(&run.stderr).contains("warning"));
+    assert!(std::fs::metadata(dir.join("inplace.pdf")).unwrap().len() < size);
+    assert!(!dir.join("inplace_1.pdf").exists());
+    assert_eq!(page_count(&dir.join("inplace.pdf")), 2);
+}
+
+#[test]
+fn merge_cli_creates_missing_output_dirs() {
+    let dir = test_dir().join("merge-dirs");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    pdf_with_pages(&dir.join("a.pdf"), 1);
+    pdf_with_pages(&dir.join("b.pdf"), 2);
+    let out = dir.join("x/y/merged.pdf");
+    let status = Command::new(env!("CARGO_BIN_EXE_presse"))
+        .arg("merge")
+        .arg(dir.join("a.pdf"))
+        .arg(dir.join("b.pdf"))
+        .arg("-o")
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(page_count(&out), 3);
 }
