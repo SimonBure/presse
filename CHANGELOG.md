@@ -4,39 +4,63 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-28
+
 ### Added
 
-- **`--jpeg-encoder`** (`press --jpeg-encoder`, off by default) — swap the
-  CPU JPEG encoder from the `image` crate's 4:4:4 to the pure-Rust
-  `jpeg-encoder` codec at YCbCr 4:2:0 with box-averaged chroma
-  (libjpeg's default model, AVX2 `simd`): smaller RGB output at the same
-  `-q` (−8% on the photo corpus at q50) and faster encodes. Grayscale
-  stays single-component. Chroma-aware per-channel SSIM added to the
-  native-image benchmark witness so the tradeoff is measured.
-- **Duplicate-image coalescing** — image streams that are semantically
-  identical (same dictionary, same payload; `/Length` and the cosmetic
-  `/Name` hint ignored, indirect `/ColorSpace`/`/SMask` references
-  followed) collapse onto one canonical object with every reference
-  rewritten. Documents embedding the same image many times shrink to the
-  unique content once (photos60 q30: 22.96 → 6.46 MB, below MuPDF's dedup
-  result, rendering unchanged).
-- **`--palette`** (`press --palette`, off by default) — an `/Indexed`
-  color-space candidate for eligible flat-color images (figures, charts,
-  scans): exact palette when ≤256 unique colors (lossless), deterministic
-  median-cut above that, accepted only above a 0.9999 native-image SSIM
-  gate; the smallest of original / JPEG / indexed wins per image.
-- **`--raster-classify`** (`press --raster-classify`, off by default) — a
-  raster classifier (adaptive Otsu threshold, connected-component density,
-  color statistics on a bounded ≤1024-px sample window) routes bitonal
-  text/rules to a 1-bit CCITT Group 4 opaque `DeviceGray` image — not an
-  `/ImageMask` stencil, whose transparent white and current-color ink
-  would change rendering (an RGB text page → a few KB of G4). The G4
-  encoding is lossless; the RGB→bitonal conversion itself is lossy, which
-  is why only near-perfect black-and-white content is masked
-  and flat-color figures to the `/Indexed` candidate; photos and mixed
-  pages stay on the JPEG path. Conservative by design: only mostly
-  black-and-white rasters with glyph-sized components are masked. The
-  smallest of original / JPEG / indexed / mask wins per image.
+- **ZIP-based documents in `presse press`** — ODF (ODT, ODS, ODP…), Office
+  Open XML (DOCX, XLSX, PPTX), EPUB, CBZ and plain ZIP, detected by
+  content and kept in their own format. The archive is rebuilt with the
+  same entries in the same order: images through the image pipeline, PDFs
+  through the PDF pipeline, nested archives recursively (3 levels); other
+  content byte for byte. Each entry keeps the smallest of its original
+  bytes, stored, or deflate level 9; `mimetype` stays first and stored.
+  ZIP extra fields are removed except Unicode names (`--keep-metadata`
+  keeps them). Signed documents (ODF/OOXML/EPUB/JAR signatures, APK
+  signing block), encrypted, ZIP64, multi-disk and self-extracting
+  archives are left untouched with a message. Decompression is bounded
+  (256 MiB per entry, 2 GiB per file, 3 nesting levels). Our own ZIP reader and
+  writer: no new crate. PDF-only flags apply to PDFs inside archives.
+  Library: `Pressed::Image` is now `Pressed::Bytes`, and
+  `presse::pdf::writer::write_compressed_pdf` writes to any `Write`.
+
+- **WebP files in `presse press`** — lossless only (no lossy WebP
+  encoder): the original with metadata removed (the image data copied as
+  is) vs, for lossless still images, an `image-webp` re-encode; the
+  smaller wins, the input is copied when neither is smaller. Same
+  metadata policy as JPEG/PNG (ICC profile and EXIF orientation kept,
+  EXIF rest, XMP and unknown chunks removed; `--keep-metadata` keeps
+  all); the VP8X header is rebuilt to match, or dropped when nothing needs
+  it. Lossy and animated files are only stripped. The re-encode only
+  beats fast encoders' output (libwebp method 0: −14% to −66% on 4 of 12
+  test images); libwebp's default output is only stripped.
+
+- **`presse convert` to JPEG, PNG and WebP** — the `-o` extension picks
+  the output format (`.pdf`, `.jpg`, `.png`, `.webp`), else the new
+  **`-t/--to`**, else PDF as before. JPEG goes through the PDF pipeline's
+  encoder at `-q`, PNG through the lossless optimizer, WebP is lossless.
+  The ICC profile (when it matches the output's color model) and EXIF
+  orientation are carried over; transparency becomes white in JPEG. A
+  larger result is written with a warning; `--merge` stays PDF-only.
+  Library:
+  `presse::convert_image`.
+
+- **JPEG and PNG files in `presse press`** — inputs are detected from
+  their bytes; images are compressed in their own format and named
+  `<input>_compressed.<ext>`. JPEG: metadata-stripped original vs a
+  re-encode at `-q`/`-s` through the PDF pipeline's transcoder. PNG,
+  lossless by default: metadata stripping, 16→8-bit / alpha / gray
+  reductions, exact palettes (≤256 colors, 1–8 bit), level-9 deflate;
+  `--palette` adds the PDF pipeline's SSIM-gated lossy palette. The
+  smallest candidate wins; when none beats the input, it is copied
+  unchanged. Metadata: ICC profile and EXIF orientation kept, the rest
+  removed; **`--keep-metadata`** keeps everything. PDF-only flags are
+  ignored for images with one warning per run. GIF/TIFF/BMP are skipped
+  for now. PDF output is byte-identical to before.
+
+- **Library entry point** — `presse::Presser::press(&[u8])` dispatches on
+  `presse::detect` (PDF, JPEG, PNG, WebP) and returns `presse::Pressed`.
+
 - **`optimize` feature + `--compression` presets** — a new Cargo feature
   (`--features optimize`) backs the default-off heavyweight passes:
   `--compression {fast,balanced,small,smallest}` presets that expand to
@@ -48,15 +72,18 @@ All notable changes to this project will be documented in this file.
   on the classifier's reconstruction-error gate), a no-op whenever a
   conservative gate rejects it. The flags fail with an explicit build hint
   when the feature is absent.
+
 - **`--dedup`** (`optimize` feature, off by default) — the duplicate-image
   coalescer extended to every stream: byte-identical FontFile programs,
   ICC profiles, XForms, patterns and arbitrary streams collapse onto one
   canonical object with every reference rewritten (identical stream +
   identical dictionary renders identically, so lossless by construction).
+
 - **`--zopfli`** (`optimize` feature, off by default) — the
   `--recompress-flate` pass with the Zopfli deflate search instead of
   level-9 zlib: a few percent smaller on text/content streams, kept only
   when strictly smaller.
+
 - **`--font-subset`** (`optimize` feature, off by default) — embedded
   TrueType fonts are subset to the glyphs the content streams actually
   show (typst's `subsetter`) and rewritten as CID fonts (`/Identity-H` +
@@ -66,6 +93,7 @@ All notable changes to this project will be documented in this file.
   subset is kept only when strictly smaller
   (194 KB TrueType font-heavy PDF → ~7 KB, pixel-identical rendering,
   text extraction intact).
+
 - **`--jbig2`** (`optimize` feature, off by default) — a lossless JBIG2
   candidate (Rust `jbig2enc-rust`, symbol-dictionary mode) for the same
   1-bit masks the G4 candidate uses; repeated glyph shapes share one
@@ -73,6 +101,7 @@ All notable changes to this project will be documented in this file.
   original. The encoder's output is oracled against
   poppler/ghostscript/mutool (identity `/Decode` polarity, verified
   pixel-identically).
+
 - **`--jpeg2000`** (`optimize` feature, off by default) — a JPEG2000
   candidate (pure-Rust `j2k` codec) for continuous-tone images, emitted as
   a minimal JP2 file (signature / file-type / image-header + sRGB /
@@ -83,6 +112,7 @@ All notable changes to this project will be documented in this file.
   error), and admitted to the size court only above a 0.98 native-SSIM
   gate — the first implementation of the generic runtime fidelity court
   every future lossy representation is expected to fill.
+
 - **`--mrc`** (`optimize` feature, off by default) — **flat two-tone
   mixed-raster content**: the composite commercial scan compressors use,
   minus the textured-background layer. A solid paper-color background (the
@@ -104,16 +134,6 @@ All notable changes to this project will be documented in this file.
   poppler's JBIG2 decoder inverts its samples, which would make the mask
   polarity viewer-dependent.
 
-- **`--recompress-flate`** (`press --recompress-flate`, off by default) —
-  qpdf-style structural recompression: existing `/FlateDecode` streams are
-  decoded and re-encoded at the writer's level 9, each kept only when
-  smaller. Lossless (no content-byte changes); recovers the level-6-vs-9
-  gap form tools leave behind (irs_fw2 corpus: 1.81 → 1.34 MB — the same
-  reduction qpdf's `--recompress-flate` achieves; qpdf's default writer
-  leaves already-Flate streams alone).
-- **Flate-wrapped JPEG** — retained or re-encoded DCT streams that shrink
-  under zlib are stored as `[FlateDecode, DCTDecode]` when the full flate
-  result is smaller (OCRmyPDF-style trick).
 - **NVDEC hardware decode stage** (`--acceleration cuda`) — baseline 4:2:0
   JPEGs decode on the NVDEC hardware engine through the Video Codec SDK
   (`libnvcuvid.so.1`, a driver component; parser-free decode mirroring
@@ -125,32 +145,133 @@ All notable changes to this project will be documented in this file.
   nvJPEG, with only ≤1-LSB IDCT-rounding differences in the current
   hardware witness (mean |Δ| 0.0014; 0.14% of pixels differ), by
   `examples/nvdec_verify.rs`.
+
 - **Pluggable GPU transcoders** — `--acceleration cuda|rocm` behind a
   unified `ImageTranscoder` trait with graceful per-stream CPU fallback
   (opt-in Cargo features; not linked into default builds).
+
+### Changed
+
+- **`convert -o` extension now matters** — `presse convert a.png -o
+  out.jpg` writes a JPEG (it used to write a PDF named `out.jpg`), and an
+  unsupported extension such as `-o out.tiff` is an error instead of a PDF
+  with that name. Without `-o` or with `-o dir/`, output is PDF as before.
+
+- **Image inputs trimmed to PNG, JPEG, WebP, GIF, TIFF and BMP** — the
+  `image` crate is built without its default feature set. That set
+  compiled an AVIF encoder (rav1e) presse never used and decoders for
+  EXR, HDR, DDS, QOI, TGA, PNM, ICO and Farbfeld, which `convert` and
+  `merge` no longer accept. AVIF input was never readable (it needs
+  `image`'s C `avif-native` feature). Measured on clean release builds
+  (4 cores, one run each): 150 → 110 crates, build 113 s → 77–83 s,
+  binary 7.13 → 6.03 MB.
+
+### Fixed
+
+- **Signed PDFs are no longer broken by `presse press`** — a digital
+  signature covers the file's exact bytes (`/ByteRange`), so rewriting a
+  signed PDF made its signature invalid, silently. `press` now detects
+  signature dictionaries (approval, certification, document timestamp,
+  usage rights) and copies the file byte for byte, with a message. Empty
+  signature fields are compressed as before. Library:
+  `Presser::press_document` and `Pressed::Untouched`.
+
+- **`presse press` and `presse convert` no longer overwrite files of the
+  same run** — two inputs with the same stem (`a.png a.bmp`, or
+  `d1/a.pdf d2/a.pdf -o out/`) used to write the same output, the second
+  silently replacing the first, and an output could land on a later input
+  before it was read (`press a.pdf a_compressed.pdf`, `convert a.png
+  a.webp --to webp`). A name that is another input or was already written
+  by the run now gets `_1`, `_2`… before the extension, with a warning.
+  `press -o` naming the input itself still compresses in place; in
+  `convert`, an output equal to its own input is written as `<stem>_1`
+  instead of skipped. Files are compared by identity, so `./`, symlinks
+  and letter case on case-insensitive disks cannot hide a clash. Other
+  existing files are still overwritten, so re-runs give the same names.
+
+- **`presse convert` and `presse merge` create missing `-o` directories**,
+  as `presse press` already did, instead of failing with "No such file or
+  directory".
+
+## [0.4.0] - 2026-08-29
+
+### Added
+
+- **`--jpeg-encoder`** (`press --jpeg-encoder`, off by default) — swap the
+  CPU JPEG encoder from the `image` crate's 4:4:4 to the pure-Rust
+  `jpeg-encoder` codec at YCbCr 4:2:0 with box-averaged chroma
+  (libjpeg's default model, AVX2 `simd`): smaller RGB output at the same
+  `-q` (−8% on the photo corpus at q50) and faster encodes. Grayscale
+  stays single-component. Chroma-aware per-channel SSIM added to the
+  native-image benchmark witness so the tradeoff is measured.
+
+- **Duplicate-image coalescing** — image streams that are semantically
+  identical (same dictionary, same payload; `/Length` and the cosmetic
+  `/Name` hint ignored, indirect `/ColorSpace`/`/SMask` references
+  followed) collapse onto one canonical object with every reference
+  rewritten. Documents embedding the same image many times shrink to the
+  unique content once (photos60 q30: 22.96 → 6.46 MB, below MuPDF's dedup
+  result, rendering unchanged).
+
+- **`--palette`** (`press --palette`, off by default) — an `/Indexed`
+  color-space candidate for eligible flat-color images (figures, charts,
+  scans): exact palette when ≤256 unique colors (lossless), deterministic
+  median-cut above that, accepted only above a 0.9999 native-image SSIM
+  gate; the smallest of original / JPEG / indexed wins per image.
+
+- **`--raster-classify`** (`press --raster-classify`, off by default) — a
+  raster classifier (adaptive Otsu threshold, connected-component density,
+  color statistics on a bounded ≤1024-px sample window) routes bitonal
+  text/rules to a 1-bit CCITT Group 4 opaque `DeviceGray` image — not an
+  `/ImageMask` stencil, whose transparent white and current-color ink
+  would change rendering (an RGB text page → a few KB of G4). The G4
+  encoding is lossless; the RGB→bitonal conversion itself is lossy, which
+  is why only near-perfect black-and-white content is masked
+  and flat-color figures to the `/Indexed` candidate; photos and mixed
+  pages stay on the JPEG path. Conservative by design: only mostly
+  black-and-white rasters with glyph-sized components are masked. The
+  smallest of original / JPEG / indexed / mask wins per image.
+
+- **`--recompress-flate`** (`press --recompress-flate`, off by default) —
+  qpdf-style structural recompression: existing `/FlateDecode` streams are
+  decoded and re-encoded at the writer's level 9, each kept only when
+  smaller. Lossless (no content-byte changes); recovers the level-6-vs-9
+  gap form tools leave behind (irs_fw2 corpus: 1.81 → 1.34 MB — the same
+  reduction qpdf's `--recompress-flate` achieves; qpdf's default writer
+  leaves already-Flate streams alone).
+
+- **Flate-wrapped JPEG** — retained or re-encoded DCT streams that shrink
+  under zlib are stored as `[FlateDecode, DCTDecode]` when the full flate
+  result is smaller (OCRmyPDF-style trick).
+
 - **Linear-time object renumbering** — lopdf's O(n²) `renumber_objects`
   replaced with a hash-map pass (67k-object doc: 530 → 62 ms); bounded
   dedup-cache hash (length + first/last 4 KiB).
+
 - **Parallel image re-encoding** — image streams are detached from the
   `Document`, re-encoded concurrently with rayon on owned buffers, and
   written back in a single serial pass (document-lock-free; only the dedup
   cache is shared).
+
 - **`--dpi` resolution cap** (`press -d <dpi>`) — placement-aware image
   downsampling with Ghostscript-style presets (75 screen, 150 ebook,
   300 printer, 600 prepress). Strict cap: never up-samples; images whose
   placement cannot be determined keep source resolution.
+
 - **`--ssim` fidelity target** (`press -s <target>`) — a quality knob
   calibrated to measured SSIM (native 512-px window, worst-case grainy
   scans) instead of an arbitrary quality number. `-s 0.86` ≈ q9 and
   `-s 0.72` ≈ q6 on the calibration content; smoother content always
   exceeds the target. Lower targets compress harder and encode faster
   (photos20: 11.0 → 4.4 MB at `-s 0.86`, same-or-faster wall time).
+
 - **Regression suite** — tests covering structural integrity (qpdf /
   ghostscript / `/Length` gates), visual SSIM, dpi-capping invariants,
   cross-reference reachability, grayscale component preservation,
   serial/parallel determinism, gapped numbering, the stock flag surface
   (`--jpeg-encoder`, `--ssim`, `--dpi`, `--raster-classify`,
   `--recompress-flate`), and GPU fallback.
+
 - **Benchmark + quality harness** — containerized 100-PDF benchmark,
   quality-vs-speed analysis (including MuPDF and the non-compressing Rust
   tools), a dpi sweep, and a multi-tool Pareto-frontier harness.
@@ -162,9 +283,11 @@ All notable changes to this project will be documented in this file.
 - **Cross-reference correctness** — objects are renumbered before saving,
   closing lopdf's gapped-numbering xref truncation (blank pages on large
   real-world PDFs; upstream tracked at J-F-Liu/lopdf#558).
+
 - **Grayscale JPEG corruption** — `/DeviceGray` streams keep a
   single-component JPEG instead of a 3-component one that rendered as
   washed-out garbage.
+
 - **Transcode cache** — keyed by quality, input kind, dimensions, and
   exact pixel bytes (equality on bytes, never a hash alone); a per-entry
   `OnceLock` guarantees one encode per unique image even under contention.

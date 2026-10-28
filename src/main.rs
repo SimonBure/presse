@@ -1,8 +1,12 @@
 #[macro_use]
 mod macros;
 mod cli;
+mod format;
+mod img;
 mod pdf;
+mod press;
 mod transcode;
+mod zip;
 
 // Rayon workers constantly allocate and drop temporary buffers during image
 // transcoding; mimalloc has per-thread caches that avoid contention on the
@@ -11,20 +15,25 @@ mod transcode;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+use std::path::Path;
+
+use format::{Format, detect};
 use pdf::builder::image_to_pdf;
-use pdf::images::{CompressOptions, QualityMode, compress_images, compress_images_opt};
+use pdf::images::compress_images;
 use pdf::merger::merge;
 use pdf::reader::{
-    get_compression_ratio_in_percent, get_pdf_size_in_kilobytes, load_input_as_pdf, load_pdf,
+    get_compression_ratio_in_percent, get_pdf_size_in_kilobytes, load_input_as_pdf, map_file,
 };
-use pdf::writer::{compress_and_save_pdf, recompress_flate as recompress_flate_streams, save_pdf};
-use transcode::resolve;
+use pdf::writer::{compress_and_save_pdf, save_pdf};
+use press::{PdfOptions, PressOptions, Pressed, Presser};
 
 use clap::Parser;
 use cli::args::{
-    Cli, Commands, CompressionMode, resolve_convert_path_output, resolve_merge_path_output,
+    Cli, Commands, CompressionMode, resolve_convert_format, resolve_convert_output,
+    resolve_convert_path_output, resolve_merge_path_output, resolve_press_output,
     resolve_press_path_output,
 };
+use img::convert::convert_image;
 
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -50,8 +59,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             jpeg2000,
             mrc,
             compression,
+            keep_metadata,
             verbose,
         } => {
+            // Flags that only mean something for PDFs, as typed (before the
+            // presets expand). Image inputs ignore them, with one warning,
+            // so a mixed batch never fails because of them.
+            let pdf_only: Vec<&str> = [
+                (dpi.is_some(), "--dpi"),
+                (raster_classify, "--raster-classify"),
+                (recompress_flate, "--recompress-flate"),
+                (dedup, "--dedup"),
+                (zopfli, "--zopfli"),
+                (font_subset, "--font-subset"),
+                (jbig2, "--jbig2"),
+                (jpeg2000, "--jpeg2000"),
+                (mrc, "--mrc"),
+                (compression != CompressionMode::Fast, "--compression"),
+            ]
+            .into_iter()
+            .filter_map(|(set, name)| set.then_some(name))
+            .collect();
+            let mut warned_pdf_only = false;
+
             // `--compression` presets expand to the individual flags; the
             // user's own flags always win (a preset never *un*-sets one).
             let (dedup, zopfli, font_subset, jbig2, jpeg2000, mrc, recompress_flate) =
@@ -93,7 +123,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // that was not compiled in is an explicit error; a compiled-in
             // backend whose driver is missing warns and falls back to CPU.
             // `--jpeg-encoder` selects the 4:2:0 codec for the CPU path.
-            let transcoder = resolve(acceleration, jpeg_encoder)?;
+            let presser = Presser::new(
+                PressOptions {
+                    quality,
+                    ssim,
+                    palette,
+                    keep_metadata,
+                    pdf: PdfOptions {
+                        dpi,
+                        raster_classify,
+                        recompress_flate,
+                        dedup,
+                        zopfli,
+                        font_subset,
+                        jbig2,
+                        jpeg2000,
+                        mrc,
+                    },
+                    verbose,
+                },
+                acceleration,
+                jpeg_encoder,
+            )?;
             let bar = ProgressBar::new(input.len() as u64);
             bar.set_style(
                 ProgressStyle::default_bar()
@@ -111,82 +162,82 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
 
-            // Create output dir if needed (once)
-            if let Some(ref path) = output {
-                if let Some(parent) = path.parent()
-                    && !parent.as_os_str().is_empty()
-                {
-                    std::fs::create_dir_all(parent)?;
-                }
-                // If -o is a directory itself (ends with /)
-                if path.to_str().unwrap().ends_with('/') {
-                    std::fs::create_dir_all(path)?;
-                }
-            }
+            create_output_dirs(&output)?;
 
+            let mut taken = Taken::new(&input);
             for file_path in &input {
-                // Loading the document
-                let mut doc = match load_pdf(file_path.to_str().unwrap()) {
-                    Ok(doc) => doc,
+                let data = match map_file(file_path) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        eprintln!("Skipping {}: {}", file_path.display(), e);
+                        continue;
+                    }
+                };
+                let own_format = detect(&data).filter(|f| *f != Format::Pdf);
+                // PDF-only flags still apply to PDFs inside archives.
+                let image = own_format.is_some_and(|f| f != Format::Zip);
+                if image && !pdf_only.is_empty() && !warned_pdf_only {
+                    eprintln!(
+                        "warning: {} only apply to PDFs; ignored for images",
+                        pdf_only.join(", ")
+                    );
+                    warned_pdf_only = true;
+                }
+
+                // Unmap the input before writing (the output may be the input
+                // file itself). PDFs release it right after parsing: lopdf
+                // copies what it needs, and compression can take a while.
+                let pressed: Result<Pressed, Box<dyn std::error::Error>> = if own_format.is_some() {
+                    let pressed = presser.press(&data);
+                    drop(data);
+                    pressed
+                } else {
+                    let doc = lopdf::Document::load_mem(&data);
+                    drop(data);
+                    doc.map(|doc| presser.press_document(doc))
+                        .map_err(Into::into)
+                };
+                let pressed = match pressed {
+                    Ok(pressed) => pressed,
                     Err(e) => {
                         eprintln!("Skipping {}: {}", file_path.display(), e);
                         continue;
                     }
                 };
 
-                compress_images_opt(
-                    &mut doc,
-                    QualityMode::press(quality, ssim),
-                    verbose,
-                    &transcoder,
-                    CompressOptions {
-                        dpi,
-                        palette,
-                        classify: raster_classify,
-                        jbig2,
-                        jpeg2000,
-                        mrc,
-                    },
-                );
-
-                // `--dedup` (optimize feature): extend the duplicate-image
-                // coalescing to every byte-identical non-image stream.
-                if dedup {
-                    let n = pdf::optimize::dedup_streams(&mut doc);
-                    verbose!(verbose, "[dedup] coalesced {n} duplicate stream object(s)");
-                }
-
-                // `--recompress-flate` (qpdf-style): re-encode existing
-                // Flate streams at the writer's level before saving.
-                if recompress_flate {
-                    let n = recompress_flate_streams(&mut doc);
-                    verbose!(
-                        verbose,
-                        "[writer] recompressed {n} existing FlateDecode stream(s)"
-                    );
-                }
-
-                // `--zopfli` (optimize feature): the same recompression with
-                // the deliberately slower Zopfli search (strictly-smaller
-                // gate, pure size win at CPU cost).
-                if zopfli {
-                    let n = pdf::optimize::recompress_flate_zopfli(&mut doc);
-                    verbose!(verbose, "[zopfli] recompressed {n} FlateDecode stream(s)");
-                }
-
-                // `--font-subset` (optimize feature): subset embedded
-                // TrueType fonts to the glyphs the content actually uses;
-                // CFF (FontFile3) programs are skipped, and every font is
-                // left untouched unless the used-glyph mapping resolves
-                // exactly and the subset is strictly smaller.
-                if font_subset {
-                    let n = pdf::optimize::subset_fonts(&mut doc);
-                    verbose!(verbose, "[fonts] subset {n} font(s)");
-                }
-
-                // Compressing the document
-                let output = resolve_press_path_output(file_path, &output);
-                compress_and_save_pdf(&mut doc, output.to_str().unwrap(), verbose)?;
+                let output = match own_format {
+                    Some(f) => {
+                        let ext = file_path.extension().and_then(|e| e.to_str());
+                        resolve_press_output(file_path, &output, ext.unwrap_or(f.extension()))
+                    }
+                    None => resolve_press_path_output(file_path, &output),
+                };
+                // Writing over the file's own input is in-place compression.
+                let output = taken.claim(&output, Some(file_path));
+                let kept = match pressed {
+                    Pressed::Pdf(mut doc) => {
+                        compress_and_save_pdf(&mut doc, output.to_str().unwrap(), verbose)?;
+                        None
+                    }
+                    Pressed::Bytes(bytes) => {
+                        std::fs::write(&output, bytes)?;
+                        None
+                    }
+                    Pressed::Unchanged(reason) => {
+                        if !same_file(file_path, &output) {
+                            std::fs::copy(file_path, &output)?;
+                        }
+                        Some(reason)
+                    }
+                    Pressed::Untouched(reason) => {
+                        eprintln!("{}: kept unchanged ({reason})", file_path.display());
+                        if !same_file(file_path, &output) {
+                            std::fs::copy(file_path, &output)?;
+                        }
+                        Some(reason)
+                    }
+                };
+                taken.record(&output);
 
                 // Compression summary
                 if verbose {
@@ -196,9 +247,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         get_pdf_size_in_kilobytes(output.to_str().unwrap()).unwrap();
                     let compression_ratio =
                         get_compression_ratio_in_percent(original_size, compressed_size);
+                    let note = kept
+                        .map(|reason| format!(", original kept: {reason}"))
+                        .unwrap_or_default();
                     bar.println(format!(
-                        "{}kB → {}kB ({:.2}% compression)",
-                        original_size, compressed_size, compression_ratio
+                        "{}kB → {}kB ({:.2}% compression){}",
+                        original_size, compressed_size, compression_ratio, note
                     ));
                 }
 
@@ -213,6 +267,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output,
             compress,
         } => {
+            create_output_dirs(&output)?;
             let mut documents = Vec::new();
             for path in &input {
                 match load_input_as_pdf(path, false) {
@@ -237,12 +292,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Convert {
             input,
             output,
+            to,
             merge: do_merge,
             compress,
             quality,
             verbose,
         } => {
-            if do_merge {
+            // Output format: the -o extension, else --to, else PDF (the
+            // historical behavior).
+            let target = match resolve_convert_format(&output, to) {
+                Ok(target) => target,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            if target != Format::Pdf {
+                convert_to_images(
+                    &input, &output, target, do_merge, compress, quality, verbose,
+                )?;
+            } else if do_merge {
                 let mut docs = Vec::new();
                 for path in &input {
                     match image_to_pdf(path, verbose) {
@@ -256,7 +325,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     compress_images(&mut merged, quality, verbose);
                 }
 
-                let out = resolve_merge_path_output(&output, compress);
+                create_output_dirs(&output)?;
+                let out =
+                    Taken::new(&input).claim(&resolve_merge_path_output(&output, compress), None);
                 if compress {
                     compress_and_save_pdf(&mut merged, out.to_str().unwrap(), verbose)?;
                 } else {
@@ -272,7 +343,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("Error: -o must be a directory when converting multiple images");
                     std::process::exit(1);
                 }
+                create_output_dirs(&output)?;
 
+                let mut taken = Taken::new(&input);
                 for path in &input {
                     let mut doc = match image_to_pdf(path, verbose) {
                         Ok(d) => d,
@@ -286,16 +359,192 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         compress_images(&mut doc, quality, verbose);
                     }
 
-                    let out = resolve_convert_path_output(path, &output);
+                    let out = taken.claim(&resolve_convert_path_output(path, &output), None);
                     if compress {
                         compress_and_save_pdf(&mut doc, out.to_str().unwrap(), verbose)?;
                     } else {
                         save_pdf(&mut doc, out.to_str().unwrap())?;
                     }
+                    taken.record(&out);
                 }
             }
         }
     }
 
     Ok(())
+}
+
+/// `convert` to JPEG, PNG or WebP: one output file per input.
+fn convert_to_images(
+    input: &[std::path::PathBuf],
+    output: &Option<std::path::PathBuf>,
+    target: Format,
+    merge: bool,
+    compress: bool,
+    quality: u8,
+    verbose: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if merge {
+        eprintln!("Error: --merge needs PDF output");
+        std::process::exit(1);
+    }
+    if compress {
+        eprintln!(
+            "warning: --compress applies to PDF output only; ignored (-q sets the JPEG quality)"
+        );
+    }
+    // Same multi-file/-o guard as the PDF path.
+    if input.len() > 1
+        && let Some(path) = output
+        && !path.is_dir()
+        && !path.to_str().unwrap().ends_with('/')
+    {
+        eprintln!("Error: -o must be a directory when converting multiple images");
+        std::process::exit(1);
+    }
+    create_output_dirs(output)?;
+    let kb = |n: usize| format!("{:.1} kB", n as f64 / 1000.0);
+
+    let mut taken = Taken::new(input);
+    for path in input {
+        let converted = std::fs::read(path)
+            .map_err(Into::into)
+            .and_then(|source| convert_image(&source, target, quality).map(|c| (source, c)));
+        let (source, converted) = match converted {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!("Skipping {}: {}", path.display(), e);
+                continue;
+            }
+        };
+        let out = taken.claim(
+            &resolve_convert_output(path, output, target.extension()),
+            None,
+        );
+        std::fs::write(&out, &converted)?;
+        taken.record(&out);
+        if converted.len() > source.len() {
+            eprintln!(
+                "warning: {} ({}) is larger than {} ({})",
+                out.display(),
+                kb(converted.len()),
+                path.display(),
+                kb(source.len())
+            );
+        }
+        verbose!(
+            verbose,
+            "{} → {} ({} → {})",
+            path.display(),
+            out.display(),
+            kb(source.len()),
+            kb(converted.len())
+        );
+    }
+    Ok(())
+}
+
+/// Create the directories `-o` needs: its parent, and the path itself when
+/// it ends with `/`.
+fn create_output_dirs(output: &Option<std::path::PathBuf>) -> std::io::Result<()> {
+    if let Some(path) = output {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        if path.to_str().unwrap().ends_with('/') {
+            std::fs::create_dir_all(path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Identifies an existing file whatever the path spelling (`./`, symlinks,
+/// letter case on case-insensitive disks).
+#[cfg(unix)]
+type FileId = (u64, u64);
+
+#[cfg(unix)]
+fn file_id(path: &Path) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.dev(), meta.ino()))
+}
+
+#[cfg(not(unix))]
+type FileId = std::path::PathBuf;
+
+#[cfg(not(unix))]
+fn file_id(path: &Path) -> Option<FileId> {
+    path.canonicalize().ok()
+}
+
+/// True when both paths name the same existing file.
+fn same_file(a: &Path, b: &Path) -> bool {
+    file_id(a).is_some_and(|id| file_id(b) == Some(id))
+}
+
+/// Files a `press` or `convert` run must not write over: its inputs and the
+/// outputs it already wrote. Any other existing file is overwritten, as
+/// before, so a re-run produces the same names.
+struct Taken {
+    inputs: std::collections::HashSet<FileId>,
+    written: std::collections::HashSet<FileId>,
+}
+
+impl Taken {
+    fn new(inputs: &[std::path::PathBuf]) -> Self {
+        Self {
+            inputs: inputs.iter().filter_map(|p| file_id(p)).collect(),
+            written: Default::default(),
+        }
+    }
+
+    /// `wanted`, or when it is taken the first free `<stem>_1.<ext>`,
+    /// `<stem>_2.<ext>`… next to it. `own_input` may be written over
+    /// (`press` compressing a file in place).
+    fn claim(&self, wanted: &Path, own_input: Option<&Path>) -> std::path::PathBuf {
+        let own = own_input.and_then(file_id);
+        let free = |p: &Path| {
+            file_id(p).is_none_or(|id| {
+                own.as_ref() == Some(&id)
+                    || (!self.inputs.contains(&id) && !self.written.contains(&id))
+            })
+        };
+        if free(wanted) {
+            return wanted.to_path_buf();
+        }
+        let numbered = |n: u32| {
+            let mut name = wanted.file_stem().unwrap_or_default().to_os_string();
+            name.push(format!("_{n}"));
+            if let Some(ext) = wanted.extension() {
+                name.push(".");
+                name.push(ext);
+            }
+            wanted.with_file_name(name)
+        };
+        let out = (1..)
+            .map(numbered)
+            .find(|p| free(p))
+            .expect("some numbered name is free");
+        let why = if file_id(wanted).is_some_and(|id| self.inputs.contains(&id)) {
+            "is one of the inputs"
+        } else {
+            "was already written by this run"
+        };
+        eprintln!(
+            "warning: {} {why}; writing {} instead",
+            wanted.display(),
+            out.display()
+        );
+        out
+    }
+
+    /// Mark a file this run just wrote.
+    fn record(&mut self, written: &Path) {
+        if let Some(id) = file_id(written) {
+            self.written.insert(id);
+        }
+    }
 }

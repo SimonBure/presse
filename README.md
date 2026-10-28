@@ -10,22 +10,26 @@
     <a href="https://github.com/SimonBure/presse"><img src="https://img.shields.io/github/stars/SimonBure/presse?style=for-the-badge&label=Stars%20&logo=github&logoColor=white" alt="Presse stars" /></a>
 </p>
 
-A fast command-line tool for PDF manipulation written in Rust.
+A fast command-line tool for PDF and image compression written in Rust.
 
 **Compress and merge** PDF files naturally and easily with this ready-to-use command line tool.
-**Convert images** of any format into ready-to-use pdfs.
+**Compress JPEG, PNG and WebP images** in their own format (PNG and WebP stay lossless), mixed freely with PDFs in one command.
+**Compress ZIP-based documents** (ODT, ODS, ODP, DOCX, XLSX, PPTX, EPUB, CBZ, ZIP) by compressing the images and PDFs inside them.
+**Convert images** (PNG, JPEG, WebP, GIF, TIFF, BMP) into ready-to-use pdfs.
 
 **~7× faster** than ghostscript (median, per-document on a 100-PDF corpus) and **~2× faster than single-threaded** rayon. Benchmarked in [`benches/docker/RESULTS.md`](benches/docker/RESULTS.md) — the headline figure is a median; best case is much higher, mean is lower.
 
 ## Features
 
 - **Image recompression** — re-encodes images at a target quality, skipping CMYK images
+- **JPEG, PNG and WebP files** — `presse press` compresses them in their own format: JPEG re-encoding, lossless PNG and WebP optimization, metadata stripped except the ICC profile and EXIF orientation; the format is detected from the file's bytes, not its extension
+- **ZIP-based documents** — `presse press` rebuilds ODF, Office Open XML, EPUB, CBZ and ZIP files with their images and PDFs compressed and every entry stored at its smallest; text and XML stay byte for byte; signed documents are left untouched
 - **Engine optimizations** — rayon-parallel re-encoding, mimalloc allocator, zlib-rs deflate backend, memory-mapped reads, deduplicated identical image streams
 - **Structural compression** — object stream packing, xref stream compression
 - **Batch processing** — compress multiple files in one command via shell wildcards
 - **Smart output paths** — sensible defaults, explicit naming, or output to a directory
 - **PDF merging** — combine multiple documents into one, with optional compression
-- **Image conversion** — transform any image (.png, .jpg) into a .pdf
+- **Image conversion** — transform PNG, JPEG, WebP, GIF, TIFF and BMP images into a .pdf, or into JPEG, PNG or lossless WebP (input format detected from the file's bytes, not its extension)
 - **Merge docs and images** in a single command, with smart format detection
 
 ## Installation
@@ -100,6 +104,18 @@ presse press document.pdf -o compressed/
 # Batch — multiple files into a directory
 presse press *.pdf -o compressed/
 
+# Images keep their format — outputs photo_compressed.jpg, logo_compressed.png
+presse press photo.jpg logo.png
+
+# PDFs and images in one command
+presse press *.pdf *.jpg *.png *.webp -o compressed/
+
+# Documents keep their format — outputs report_compressed.odt, slides_compressed.pptx
+presse press report.odt slides.pptx
+
+# Keep all image metadata (EXIF, XMP, comments, text chunks)
+presse press photo.jpg --keep-metadata
+
 # Set JPEG quality (0–100, default 80)
 presse press document.pdf --quality 60
 
@@ -124,15 +140,112 @@ presse merge *.png *.pdf
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-o, --output` | `<input>_compressed.pdf` | Output file or directory |
-| `-q, --quality` | `80` | Image recompression quality (0–100) |
-| `-d, --dpi` | source resolution | Cap placed image resolution to DPI pixels/inch (75 screen, 150 ebook, 300 printer, 600 prepress); omitted = keep source resolution |
+| `-o, --output` | `<input>_compressed.<ext>` | Output file or directory (same format as the input) |
+| `-q, --quality` | `80` | Image recompression quality (0–100), for images inside PDFs and for JPEG files; PNG and WebP files stay lossless |
+| `-d, --dpi` | source resolution | Cap placed image resolution to DPI pixels/inch (75 screen, 150 ebook, 300 printer, 600 prepress); omitted = keep source resolution. PDFs only: image files ignore it, with one warning per run |
 | `-s, --ssim` | `1.0` | Target output fidelity as measured SSIM (calibrated on grainy scans — the worst case for JPEG — so smoother content exceeds the target); lower = smaller and faster. `1.0` = use `-q` as given |
-| `--palette` | `false` | Also build an `/Indexed` palette candidate for eligible flat-color images (figures, charts, scans) and keep the smallest of original / JPEG / indexed; exact palettes are lossless, lossy ones are gated on 0.9999 native SSIM |
+| `--palette` | `false` | Also build an `/Indexed` palette candidate for eligible flat-color images (figures, charts, scans) and keep the smallest of original / JPEG / indexed; exact palettes are lossless, lossy ones are gated on 0.9999 native SSIM. For PNG files: allows the lossy palette (exact palettes are always tried) |
+| `--keep-metadata` | `false` | JPEG/PNG/WebP files: keep all metadata. Default keeps only the ICC color profile and the EXIF orientation |
 | `--jpeg-encoder` | `false` | Use the pure-Rust `jpeg-encoder` codec (YCbCr 4:2:0, box-averaged chroma — libjpeg's default model, which Ghostscript/qpdf use) instead of the `image` crate's 4:4:4 encoder; smaller RGB output at the same `-q`, faster, but opt-in because luminance-SSIM courts don't see chroma loss |
 | `--raster-classify` | `false` | Run the raster classifier on every decoded image: bitonal text/rules stored as a photographic RGB raster are re-stored as a 1-bit CCITT G4 opaque `DeviceGray` image (an RGB page → a few KB of G4). The G4 encoding of the 1-bit payload is lossless; the RGB→bitonal conversion itself is lossy, which is why only near-perfect black-and-white content is masked. Flat-color figures get the `/Indexed` palette candidate; photos and mixed pages are never masked. The smallest of original / JPEG / indexed / mask wins per image |
 | `--recompress-flate` | `false` | qpdf-style structural recompression: decode existing `/FlateDecode` streams and re-encode them at the writer's level 9, keeping each only when smaller. Lossless (no content-byte changes); recovers the compression-level gap form tools leave behind |
 | `-v, --verbose` | `false` | Print size comparison after each file |
+
+**Output names.** Missing `-o` directories are created. A run never writes
+over another of its inputs or over a file it already wrote: the clashing
+output gets `_1`, `_2`… before its extension, with a warning
+(`presse press d1/a.pdf d2/a.pdf -o out/` writes `a_compressed.pdf` and
+`a_compressed_1.pdf`). `-o` naming the input itself compresses it in
+place. Other existing files are overwritten as before, so running the
+same command twice gives the same file names.
+
+**Signed PDFs.** A digital signature covers the file's exact bytes, so
+any rewrite, even a lossless one, breaks it. `press` detects signatures
+(approval, certification, document timestamps, usage rights) and copies
+those files unchanged, with a message. Empty signature fields do not count.
+
+### Images — JPEG, PNG and WebP
+
+`presse press` detects each input from its first bytes: a JPEG, PNG or
+WebP signature means an image, anything else goes to the PDF pipeline (as
+before). Images come back in their own format, named
+`<input>_compressed.<ext>`. For each image, presse builds candidates and
+keeps the smallest; when none is smaller than the input, the input is
+copied unchanged.
+
+- **JPEG** — two candidates: the original with metadata removed
+  (lossless, the compressed data is copied as is), and a re-encode at
+  `-q` (or `-s`) through the same encoder the PDF pipeline uses
+  (`--jpeg-encoder` and `--acceleration` apply). CMYK JPEGs are only
+  stripped, never re-encoded.
+- **PNG** — lossless by default: metadata removed; 16-bit samples that
+  are exact 8-bit values, all-opaque alpha and gray stored as RGB are
+  reduced; images with at most 256 colors become palette images (1/2/4/8
+  bits per pixel); everything is deflated at level 9. `--palette` also
+  allows a lossy palette for opaque images with more colors, under the
+  same 0.9999 SSIM gate as in PDFs. Animated PNGs are only stripped.
+- **WebP** — lossless only (presse has no lossy WebP encoder, so `-q`
+  does not apply): metadata removed, the image data copied as is; lossless
+  still images are also re-encoded with `image-webp` and the smaller file
+  wins. That encoder has fewer coding tools than libwebp, so the re-encode
+  only beats files from fast encoders (libwebp method 0); files from
+  libwebp's default settings are only stripped. Lossy and animated WebPs
+  are only stripped.
+- **Metadata** — kept: ICC profile, EXIF orientation (rewritten as a
+  minimal EXIF block), and PNG color/pixel-size chunks. Removed: the rest
+  of EXIF (camera, GPS, thumbnail), XMP, comments, Photoshop blocks, PNG
+  text and time chunks, unknown WebP chunks. `--keep-metadata` keeps
+  everything.
+- **Not yet** — GIF, TIFF and BMP files are skipped with a message.
+  Flags that only apply to PDFs (`-d`, `--raster-classify`,
+  `--recompress-flate`, the `optimize` passes, `--compression`) are
+  ignored for images, with one warning per run, so a mixed batch never
+  fails because of them.
+
+Measured at the defaults on 4 JPEG photos and 9 PNGs (scikit-image sample
+data and the `webp` crate's test photo): JPEGs −37% to −62% (DSSIM
+0.0005–0.0017); PNGs pixel-identical, −2% to −43% on six files and
+unchanged on three that were already optimal. A poorly deflated synthetic
+PNG (the CI fixture) shrinks 98%.
+
+WebP, measured on 48 files made with libwebp from 12 of those images
+(lossless at methods 0, 4 and 6, lossy at q80), no metadata:
+pixel-identical; the four method-0 files that a re-encode beats shrink
+14% to 66%, the 44 others are copied unchanged. The same files carrying
+an ICC profile, camera EXIF and a 3.3 kB XMP packet shrink by the
+metadata (−3.4 kB on a 14 kB lossy photo), animated ones included.
+
+### Documents — ODT, DOCX, EPUB and other ZIP-based files
+
+OpenDocument (ODT, ODS, ODP…), Office Open XML (DOCX, XLSX, PPTX), EPUB,
+CBZ and plain ZIP files are detected by their bytes and come back in
+their own format, `<input>_compressed.<ext>`. The archive is rebuilt with
+the same entries in the same order:
+
+- **Contents** — JPEG, PNG and WebP images go through the image pipeline
+  above (same `-q`, `-s`, `--palette`, `--keep-metadata`: JPEGs are
+  re-encoded at q80 by default), PDFs through the PDF pipeline (with its
+  flags, `-d` included), nested archives recursively (3 levels). Text,
+  XML, fonts and everything else keep their content byte for byte.
+- **Storage** — each entry keeps the smallest of its original compressed
+  bytes, uncompressed, or deflate level 9. ODF and EPUB's `mimetype` entry
+  stays first and uncompressed, as both formats require.
+- **Metadata** — names, timestamps, attributes and comments are kept;
+  ZIP extra fields (extended timestamps, Unix owners) are removed except
+  Unicode names; `--keep-metadata` keeps them.
+- **Left untouched**, with a message — signed documents (ODF, OOXML, EPUB
+  and JAR signatures, APK signing block), since any change breaks the
+  signature; encrypted, ZIP64, multi-disk and self-extracting archives.
+  Entries over 256 MiB, and anything past 2 GiB of decompressed content
+  per file (nested archives included), are copied as is.
+
+Measured on documents written by LibreOffice (ODT, DOCX, ODS, XLSX) and
+pandoc (EPUB) with 7 photos and screenshots: ODT −43.0%, DOCX −43.4%,
+EPUB −43.5% — almost all from the JPEG re-encode; deflating the entries
+alone gives 0–1%. Spreadsheets without images: −1.7% (ODS), −3.4% (XLSX).
+A CBZ of 3 JPEG pages: −51%; a ZIP of 3 PDFs: −78%. Every output reads
+back with Python's `zipfile` and `unzip -t`; LibreOffice opens the
+documents with the same page count (spreadsheets render pixel-identical).
 
 ### Resolution capping (`--dpi`)
 
@@ -354,6 +467,48 @@ presse merge a.pdf b.pdf --compress
 |------|---------|-------------|
 | `-o, --output` | `merged.pdf` | Output file or directory |
 | `-c, --compress` | `false` | Compress images in the merged document |
+
+### Convert — `presse convert`
+
+```bash
+# Images to PDF (the default) — outputs photo.pdf
+presse convert photo.jpg
+
+# The -o extension picks the format: .pdf, .jpg, .png or .webp
+presse convert photo.png -o photo.webp
+
+# --to picks it when -o has no extension (batch into a directory)
+presse convert *.png --to jpg -q 85 -o jpegs/
+
+# All images into one compressed PDF
+presse convert *.png -m -c -q 50
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o, --output` | `<input>.<ext>` | Output file or directory; a file's extension picks the format |
+| `-t, --to` | `pdf` | Output format when `-o` has no extension: `pdf`, `jpg`/`jpeg`, `png`, `webp` |
+| `-m, --merge` | `false` | Merge all images into a single PDF (PDF output only) |
+| `-c, --compress` | `false` | JPEG-compress the images embedded in the PDF output |
+| `-q, --quality` | `80` | JPEG quality, for `--compress` and for JPEG output |
+
+Image output uses the same encoders as `presse press`: JPEG through the
+PDF pipeline's encoder, PNG through the lossless optimizer (palettes,
+reductions, level-9 deflate), WebP lossless (presse has no lossy WebP
+encoder). The ICC profile and EXIF orientation follow the image when the
+output can hold them (a profile is dropped when it doesn't match the
+output's color model, e.g. a CMYK profile on RGB pixels); other metadata
+is not carried. Transparent areas become white in JPEG. Animated inputs
+keep their first frame. When the result is larger than the input (a photo
+JPEG as lossless WebP or PNG usually is), it is written anyway with a
+warning. `-o` with an unknown extension, or one that disagrees with
+`--to`, is an error.
+
+Output names follow the `press` rules (missing `-o` directories are
+created; a clash with an input or an earlier output gets `_1`, `_2`…),
+except that an output never replaces even its own input: `convert a.png
+a.bmp` writes `a.pdf` and `a_1.pdf`; `convert a.png a.webp --to webp`
+keeps `a.webp` and writes `a_1.webp` and `a_2.webp`.
 
 ## GPU acceleration (experimental)
 
