@@ -2,9 +2,10 @@
 //! compressed in its own format.
 //!
 //! The format is detected from the content ([`crate::format::detect`]).
-//! JPEG, PNG and WebP are compressed in their own format; GIF, TIFF and BMP
-//! are rejected; anything else goes down the PDF pipeline, exactly as
-//! `presse press` handled every input before images were supported.
+//! JPEG, PNG, WebP and ZIP-based documents are compressed in their own
+//! format; GIF, TIFF and BMP are rejected; anything else goes down the PDF
+//! pipeline, exactly as `presse press` handled every input before images
+//! were supported.
 
 use lopdf::Document;
 
@@ -58,12 +59,14 @@ pub enum Pressed {
     /// A processed PDF, to be written with
     /// [`crate::pdf::writer::compress_and_save_pdf`].
     Pdf(Box<Document>),
-    /// A smaller image, in the input's format.
-    Image(Vec<u8>),
+    /// A smaller file, in the input's format (images, ZIP-based
+    /// documents).
+    Bytes(Vec<u8>),
     /// No smaller version was found: the input is the result.
     Unchanged(String),
-    /// Deliberately not processed (a signed PDF): the input is the result,
-    /// and the reason should be shown to the user.
+    /// Deliberately not processed (a signed PDF or document, an archive
+    /// that cannot be rebuilt faithfully): the input is the result, and the
+    /// reason should be shown to the user.
     Untouched(String),
 }
 
@@ -90,11 +93,58 @@ impl Presser {
 
     /// Compress one file given its full content.
     pub fn press(&self, input: &[u8]) -> Result<Pressed, Box<dyn std::error::Error>> {
+        self.press_at(input, 0, &std::cell::Cell::new(crate::zip::BUDGET))
+    }
+
+    pub(crate) fn options(&self) -> &PressOptions {
+        &self.options
+    }
+
+    /// A smaller version of a file found inside an archive at `depth`:
+    /// images, PDFs and nested archives. `None` keeps the content as is
+    /// (anything else, nothing smaller, or an error). `budget` bounds the
+    /// bytes nested archives may decompress.
+    pub(crate) fn press_entry(
+        &self,
+        data: &[u8],
+        depth: u8,
+        budget: &std::cell::Cell<u64>,
+    ) -> Option<Vec<u8>> {
+        match detect(data)? {
+            Format::Jpeg | Format::Png | Format::WebP => {}
+            // Strictly at offset 0 here: an XML or XHTML entry may mention
+            // `%PDF-` in its first KiB.
+            Format::Pdf if data.starts_with(b"%PDF-") => {}
+            Format::Zip if depth <= crate::zip::MAX_DEPTH => {}
+            _ => return None,
+        }
+        let smaller = match self.press_at(data, depth, budget) {
+            Ok(Pressed::Bytes(b)) => b,
+            Ok(Pressed::Pdf(mut doc)) => {
+                let mut out = Vec::new();
+                crate::pdf::writer::write_compressed_pdf(&mut doc, &mut out, false).ok()?;
+                out
+            }
+            Ok(Pressed::Unchanged(_) | Pressed::Untouched(_)) => return None,
+            Err(e) => {
+                verbose!(self.options.verbose, "[zip] entry kept as is: {e}");
+                return None;
+            }
+        };
+        (smaller.len() < data.len()).then_some(smaller)
+    }
+
+    fn press_at(
+        &self,
+        input: &[u8],
+        depth: u8,
+        budget: &std::cell::Cell<u64>,
+    ) -> Result<Pressed, Box<dyn std::error::Error>> {
         let o = &self.options;
         let image = |outcome: Outcome| match outcome {
             Outcome::Smaller { bytes, how } => {
                 verbose!(o.verbose, "[image] kept candidate: {how}");
-                Pressed::Image(bytes)
+                Pressed::Bytes(bytes)
             }
             Outcome::Unchanged(reason) => Pressed::Unchanged(reason),
         };
@@ -108,6 +158,7 @@ impl Presser {
                 img::png::press(input, o.palette, o.keep_metadata, o.verbose).map(image)
             }
             Some(Format::WebP) => img::webp::press(input, o.keep_metadata, o.verbose).map(image),
+            Some(Format::Zip) => crate::zip::press(input, self, depth, budget),
             Some(f @ (Format::Gif | Format::Tiff | Format::Bmp)) => {
                 Err(format!("{} compression is not supported yet", f.name()).into())
             }

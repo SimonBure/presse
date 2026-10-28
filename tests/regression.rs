@@ -4177,7 +4177,7 @@ fn library_presser_detects_and_compresses() {
     )
     .unwrap();
     match presser.press(&jpeg).unwrap() {
-        Pressed::Image(bytes) => {
+        Pressed::Bytes(bytes) => {
             assert!(bytes.len() < jpeg.len());
             assert_eq!(detect(&bytes), Some(Format::Jpeg));
         }
@@ -4709,4 +4709,188 @@ fn press_keeps_signed_pdfs_byte_identical() {
         presser.press(&signed).unwrap(),
         Pressed::Untouched(_)
     ));
+}
+
+// ---------------------------------------------------------------------------
+// ZIP-based documents (`presse press` on ODT, DOCX, EPUB, ZIP…)
+// ---------------------------------------------------------------------------
+
+/// A ZIP of `(name, content, deflate)`, written independently of presse
+/// (deflate level 1, no extra fields).
+fn zip_of(files: &[(&str, &[u8], bool)]) -> Vec<u8> {
+    use std::io::Write;
+    let (mut out, mut central) = (Vec::new(), Vec::new());
+    for (name, content, deflate) in files {
+        let data = if *deflate {
+            let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(1));
+            e.write_all(content).unwrap();
+            e.finish().unwrap()
+        } else {
+            content.to_vec()
+        };
+        let mut crc = flate2::Crc::new();
+        crc.update(content);
+        let method: u16 = if *deflate { 8 } else { 0 };
+        let offset = out.len() as u32;
+        let common = |v: &mut Vec<u8>| {
+            v.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            v.extend_from_slice(&0u16.to_le_bytes()); // flags
+            v.extend_from_slice(&method.to_le_bytes());
+            v.extend_from_slice(&[0, 0x60, 0x21, 0x5a]); // time, date
+            v.extend_from_slice(&crc.sum().to_le_bytes());
+            v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            v.extend_from_slice(&(content.len() as u32).to_le_bytes());
+            v.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            v.extend_from_slice(&0u16.to_le_bytes()); // extra length
+        };
+        out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        common(&mut out);
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&data);
+        central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        central.extend_from_slice(&20u16.to_le_bytes()); // version made by
+        common(&mut central);
+        // Comment length, disk number, internal and external attributes.
+        central.extend_from_slice(&[0; 10]);
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+    }
+    let (cd_offset, cd_size) = (out.len() as u32, central.len() as u32);
+    out.extend_from_slice(&central);
+    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&(files.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(files.len() as u16).to_le_bytes());
+    out.extend_from_slice(&cd_size.to_le_bytes());
+    out.extend_from_slice(&cd_offset.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}
+
+/// `(name, method, content)` of every entry, read from the central
+/// directory, checking each CRC.
+fn zip_entries(zip: &[u8]) -> Vec<(String, u16, Vec<u8>)> {
+    use std::io::Read;
+    let u16_at = |a: usize| u16::from_le_bytes([zip[a], zip[a + 1]]) as usize;
+    let u32_at = |a: usize| u32::from_le_bytes(zip[a..a + 4].try_into().unwrap()) as usize;
+    let end = (0..=zip.len() - 22)
+        .rev()
+        .find(|&a| zip[a..a + 4] == [0x50, 0x4b, 5, 6])
+        .unwrap();
+    let mut at = u32_at(end + 16);
+    let mut out = Vec::new();
+    for _ in 0..u16_at(end + 10) {
+        assert_eq!(&zip[at..at + 4], [0x50, 0x4b, 1, 2]);
+        let (method, crc, size) = (u16_at(at + 10), u32_at(at + 16), u32_at(at + 20));
+        let (n, m, k) = (u16_at(at + 28), u16_at(at + 30), u16_at(at + 32));
+        let name = String::from_utf8(zip[at + 46..at + 46 + n].to_vec()).unwrap();
+        let local = u32_at(at + 42);
+        let start = local + 30 + u16_at(local + 26) + u16_at(local + 28);
+        let raw = &zip[start..start + size];
+        let content = if method == 8 {
+            let mut v = Vec::new();
+            flate2::read::DeflateDecoder::new(raw)
+                .read_to_end(&mut v)
+                .unwrap();
+            v
+        } else {
+            raw.to_vec()
+        };
+        let mut c = flate2::Crc::new();
+        c.update(&content);
+        assert_eq!(c.sum() as usize, crc, "{name}: CRC");
+        out.push((name, method as u16, content));
+        at += 46 + n + m + k;
+    }
+    out
+}
+
+#[test]
+fn press_cli_rebuilds_zip_documents_and_keeps_signed_ones() {
+    let dir = test_dir().join("zip-docs");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let figure = flat_figure_rgb(120, 80);
+    let png = png_with_chunks(&figure, 120, 80, &[]);
+    let photo = jpeg_with_segments(&photoish_rgb(160, 120), 160, 120, &[]);
+    let xml = b"<office:text>presse keeps XML byte for byte</office:text>".repeat(60);
+    let odt = zip_of(&[
+        (
+            "mimetype",
+            b"application/vnd.oasis.opendocument.text",
+            false,
+        ),
+        ("content.xml", &xml, true),
+        ("Pictures/figure.png", &png, false),
+        ("Pictures/photo.jpg", &photo, false),
+    ]);
+    std::fs::write(dir.join("doc.odt"), &odt).unwrap();
+    let signed = zip_of(&[
+        (
+            "mimetype",
+            b"application/vnd.oasis.opendocument.text",
+            false,
+        ),
+        ("content.xml", &xml, false),
+        ("META-INF/documentsignatures.xml", b"<signatures/>", false),
+    ]);
+    std::fs::write(dir.join("signed.odt"), &signed).unwrap();
+    let (mut doc, pages_id) = new_doc();
+    add_image_page(&mut doc, pages_id, photoish_rgb(200, 150), 200, 150, false);
+    let pdf_path = dir.join("inner.pdf");
+    save_pdf(&mut doc, pdf_path.to_str().unwrap()).unwrap();
+    let pdf = std::fs::read(&pdf_path).unwrap();
+    std::fs::write(dir.join("pdfs.zip"), zip_of(&[("inner.pdf", &pdf, false)])).unwrap();
+
+    // -d applies to the PDF inside the ZIP, so no "only apply to PDFs".
+    let run = Command::new(env!("CARGO_BIN_EXE_presse"))
+        .arg("press")
+        .arg(dir.join("doc.odt"))
+        .arg(dir.join("signed.odt"))
+        .arg(dir.join("pdfs.zip"))
+        .args(["-d", "150", "-o"])
+        .arg(format!("{}/", dir.join("out").display()))
+        .output()
+        .unwrap();
+    assert!(run.status.success());
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(!stderr.contains("only apply to PDFs"), "{stderr}");
+    assert!(
+        stderr.contains("signed.odt: kept unchanged (signed document"),
+        "{stderr}"
+    );
+
+    let out = std::fs::read(dir.join("out/doc_compressed.odt")).unwrap();
+    assert!(out.len() < odt.len());
+    let entries = zip_entries(&out);
+    let names: Vec<_> = entries.iter().map(|e| e.0.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "mimetype",
+            "content.xml",
+            "Pictures/figure.png",
+            "Pictures/photo.jpg"
+        ]
+    );
+    assert_eq!(entries[0].1, 0, "mimetype stays stored");
+    assert_eq!(entries[1].2, xml, "XML content is untouched");
+    let figure_out = image::load_from_memory(&entries[2].2).unwrap().to_rgb8();
+    assert_eq!(figure_out.into_raw(), figure, "PNG stays lossless");
+    assert!(
+        entries[3].2.len() < photo.len(),
+        "the q95 JPEG is re-encoded"
+    );
+
+    assert_eq!(
+        std::fs::read(dir.join("out/signed_compressed.odt")).unwrap(),
+        signed
+    );
+
+    let zipped = std::fs::read(dir.join("out/pdfs_compressed.zip")).unwrap();
+    let inner = &zip_entries(&zipped)[0].2;
+    assert!(inner.len() < pdf.len());
+    let inner_path = dir.join("out/inner.pdf");
+    std::fs::write(&inner_path, inner).unwrap();
+    assert_well_formed(&inner_path);
 }

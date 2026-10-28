@@ -6,6 +6,7 @@ mod img;
 mod pdf;
 mod press;
 mod transcode;
+mod zip;
 
 // Rayon workers constantly allocate and drop temporary buffers during image
 // transcoding; mimalloc has per-thread caches that avoid contention on the
@@ -172,8 +173,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                 };
-                let image_format = detect(&data).filter(|f| *f != Format::Pdf);
-                if image_format.is_some() && !pdf_only.is_empty() && !warned_pdf_only {
+                let own_format = detect(&data).filter(|f| *f != Format::Pdf);
+                // PDF-only flags still apply to PDFs inside archives.
+                let image = own_format.is_some_and(|f| f != Format::Zip);
+                if image && !pdf_only.is_empty() && !warned_pdf_only {
                     eprintln!(
                         "warning: {} only apply to PDFs; ignored for images",
                         pdf_only.join(", ")
@@ -184,8 +187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Unmap the input before writing (the output may be the input
                 // file itself). PDFs release it right after parsing: lopdf
                 // copies what it needs, and compression can take a while.
-                let pressed: Result<Pressed, Box<dyn std::error::Error>> = if image_format.is_some()
-                {
+                let pressed: Result<Pressed, Box<dyn std::error::Error>> = if own_format.is_some() {
                     let pressed = presser.press(&data);
                     drop(data);
                     pressed
@@ -203,7 +205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                let output = match image_format {
+                let output = match own_format {
                     Some(f) => {
                         let ext = file_path.extension().and_then(|e| e.to_str());
                         resolve_press_output(file_path, &output, ext.unwrap_or(f.extension()))
@@ -217,7 +219,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         compress_and_save_pdf(&mut doc, output.to_str().unwrap(), verbose)?;
                         None
                     }
-                    Pressed::Image(bytes) => {
+                    Pressed::Bytes(bytes) => {
                         std::fs::write(&output, bytes)?;
                         None
                     }
