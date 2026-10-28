@@ -62,6 +62,9 @@ pub enum Pressed {
     Image(Vec<u8>),
     /// No smaller version was found: the input is the result.
     Unchanged(String),
+    /// Deliberately not processed (a signed PDF): the input is the result,
+    /// and the reason should be shown to the user.
+    Untouched(String),
 }
 
 /// Compresses files. Build once per run: it resolves the transcoding
@@ -108,16 +111,26 @@ impl Presser {
             Some(f @ (Format::Gif | Format::Tiff | Format::Bmp)) => {
                 Err(format!("{} compression is not supported yet", f.name()).into())
             }
-            Some(Format::Pdf) | None => {
-                let doc = Document::load_mem(input)?;
-                Ok(Pressed::Pdf(Box::new(self.press_pdf(doc))))
-            }
+            Some(Format::Pdf) | None => Ok(self.press_document(Document::load_mem(input)?)),
         }
     }
 
-    /// Compress an already-parsed PDF. Lets a caller release the source
-    /// bytes right after parsing (`lopdf` copies what it needs), which keeps
-    /// peak memory down on large documents.
+    /// Compress an already-parsed PDF, unless it is signed: rewriting a
+    /// signed PDF, even losslessly, invalidates its signature, so it is
+    /// left [`Pressed::Untouched`]. Lets a caller release the source bytes
+    /// right after parsing (`lopdf` copies what it needs), which keeps peak
+    /// memory down on large documents.
+    pub fn press_document(&self, doc: Document) -> Pressed {
+        if crate::pdf::signature::is_signed(&doc) {
+            return Pressed::Untouched(
+                "signed PDF: rewriting it would invalidate the signature".into(),
+            );
+        }
+        Pressed::Pdf(Box::new(self.press_pdf(doc)))
+    }
+
+    /// Compress an already-parsed PDF, signed or not (see
+    /// [`Presser::press_document`]).
     pub fn press_pdf(&self, mut doc: Document) -> Document {
         let o = &self.options;
         let p = &o.pdf;

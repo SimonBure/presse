@@ -4606,3 +4606,107 @@ fn merge_cli_creates_missing_output_dirs() {
     assert!(status.success());
     assert_eq!(page_count(&out), 3);
 }
+
+/// A one-image PDF with a signature field; `signed` fills it with a
+/// signature dictionary (structure only: detection never checks the
+/// cryptography).
+fn pdf_with_signature_field(signed: bool) -> Document {
+    let (mut doc, pages_id) = new_doc();
+    add_image_page(&mut doc, pages_id, photoish_rgb(160, 120), 160, 120, false);
+    let mut field = dictionary! {
+        "FT" => "Sig",
+        "T" => Object::string_literal("Sig1"),
+        "Subtype" => "Widget",
+        "Rect" => vec![0.into(), 0.into(), 0.into(), 0.into()],
+    };
+    if signed {
+        let sig = doc.add_object(dictionary! {
+            "Type" => "Sig",
+            "Filter" => "Adobe.PPKLite",
+            "SubFilter" => "adbe.pkcs7.detached",
+            "ByteRange" => vec![0.into(), 100.into(), 200.into(), 300.into()],
+            "Contents" => Object::String(vec![0; 64], lopdf::StringFormat::Hexadecimal),
+        });
+        field.set("V", sig);
+    }
+    let field_id = doc.add_object(field);
+    let root = doc.trailer.get(b"Root").unwrap().as_reference().unwrap();
+    doc.get_object_mut(root)
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set(
+            "AcroForm",
+            dictionary! { "Fields" => vec![field_id.into()] },
+        );
+    doc
+}
+
+#[test]
+fn press_keeps_signed_pdfs_byte_identical() {
+    use presse::{PdfOptions, PressOptions, Pressed, Presser};
+    let dir = test_dir().join("signed");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    save_pdf(
+        &mut pdf_with_signature_field(true),
+        dir.join("signed.pdf").to_str().unwrap(),
+    )
+    .unwrap();
+    save_pdf(
+        &mut pdf_with_signature_field(false),
+        dir.join("empty-field.pdf").to_str().unwrap(),
+    )
+    .unwrap();
+
+    let run = Command::new(env!("CARGO_BIN_EXE_presse"))
+        .arg("press")
+        .arg(dir.join("signed.pdf"))
+        .arg(dir.join("empty-field.pdf"))
+        .arg("-o")
+        .arg(format!("{}/", dir.join("out").display()))
+        .output()
+        .unwrap();
+    assert!(run.status.success());
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("signed.pdf: kept unchanged (signed PDF"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("empty-field.pdf: kept unchanged"),
+        "{stderr}"
+    );
+
+    let signed = std::fs::read(dir.join("signed.pdf")).unwrap();
+    assert_eq!(
+        std::fs::read(dir.join("out/signed_compressed.pdf")).unwrap(),
+        signed,
+        "a signed PDF must be copied byte for byte"
+    );
+    // An empty signature field signs nothing: compressed as usual.
+    let empty = std::fs::metadata(dir.join("empty-field.pdf"))
+        .unwrap()
+        .len();
+    let out = dir.join("out/empty-field_compressed.pdf");
+    assert!(std::fs::metadata(&out).unwrap().len() < empty);
+    assert_well_formed(&out);
+
+    let presser = Presser::new(
+        PressOptions {
+            quality: 80,
+            ssim: None,
+            palette: false,
+            keep_metadata: false,
+            pdf: PdfOptions::default(),
+            verbose: false,
+        },
+        Acceleration::Cpu,
+        false,
+    )
+    .unwrap();
+    assert!(matches!(
+        presser.press(&signed).unwrap(),
+        Pressed::Untouched(_)
+    ));
+}

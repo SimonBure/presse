@@ -192,7 +192,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     let doc = lopdf::Document::load_mem(&data);
                     drop(data);
-                    doc.map(|doc| Pressed::Pdf(Box::new(presser.press_pdf(doc))))
+                    doc.map(|doc| presser.press_document(doc))
                         .map_err(Into::into)
                 };
                 let pressed = match pressed {
@@ -222,6 +222,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         None
                     }
                     Pressed::Unchanged(reason) => {
+                        if !same_file(file_path, &output) {
+                            std::fs::copy(file_path, &output)?;
+                        }
+                        Some(reason)
+                    }
+                    Pressed::Untouched(reason) => {
+                        eprintln!("{}: kept unchanged ({reason})", file_path.display());
                         if !same_file(file_path, &output) {
                             std::fs::copy(file_path, &output)?;
                         }
