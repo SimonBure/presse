@@ -6,4 +6,5 @@ pub mod merger;
 pub mod optimize;
 pub(crate) mod placements;
 pub mod reader;
+pub mod signature;
 pub mod writer;

@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Signed PDFs are no longer broken by `presse press`** — a digital
+  signature covers the file's exact bytes (`/ByteRange`), so rewriting a
+  signed PDF made its signature invalid, silently. `press` now detects
+  signature dictionaries (approval, certification, document timestamp,
+  usage rights) and copies the file byte for byte, with a message. Empty
+  signature fields are compressed as before. Library:
+  `Presser::press_document` and `Pressed::Untouched`.
 - **`presse press` and `presse convert` no longer overwrite files of the
   same run** — two inputs with the same stem (`a.png a.bmp`, or
   `d1/a.pdf d2/a.pdf -o out/`) used to write the same output, the second

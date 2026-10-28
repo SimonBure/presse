@@ -154,6 +154,11 @@ output gets `_1`, `_2`… before its extension, with a warning
 place. Other existing files are overwritten as before, so running the
 same command twice gives the same file names.
 
+**Signed PDFs.** A digital signature covers the file's exact bytes, so
+any rewrite, even a lossless one, breaks it. `press` detects signatures
+(approval, certification, document timestamps, usage rights) and copies
+those files unchanged, with a message. Empty signature fields do not count.
+
 ### Images — JPEG, PNG and WebP
 
 `presse press` detects each input from its first bytes: a JPEG, PNG or
