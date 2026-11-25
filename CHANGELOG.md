@@ -152,6 +152,13 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **README trimmed to the essentials** — what presse does, install, the
+  three commands and their core flags. Details moved verbatim to `docs/`:
+  `pdf.md` (every `press` flag and PDF pass), `images.md`, `documents.md`,
+  `optimize.md`, `gpu.md`, `benchmark.md`, `development.md`. The documented
+  minimum Rust version is corrected from 1.85 to 1.88, which `image` and
+  `lopdf` require.
+
 - **`convert -o` extension now matters** — `presse convert a.png -o
   out.jpg` writes a JPEG (it used to write a PDF named `out.jpg`), and an
   unsupported extension such as `-o out.tiff` is an error instead of a PDF
