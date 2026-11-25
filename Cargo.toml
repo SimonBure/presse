@@ -1,9 +1,9 @@
 [package]
 name = "presse"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 authors = ["Simon Buré"]
-description = "Fast PDF compression CLI — JPEG recompression and structural optimization"
+description = "Fast compression CLI for PDF, JPEG, PNG, WebP and ZIP-based documents (ODT, DOCX, EPUB) — image recompression and structural optimization"
 license = "GPL-3.0"
 repository = "https://github.com/SimonBure/presse"
 homepage = "https://github.com/SimonBure/presse"
@@ -41,7 +41,17 @@ clap = { version = "4", features = ["derive"] }
 
 # Progress bar
 indicatif = "0.17"
-image = "0.25.9"
+# Only the formats presse reads. The default feature set also compiles an
+# AVIF *encoder* (rav1e) presse never calls (AVIF *decoding* needs the C
+# `avif-native` feature, which was never on) plus niche decoders (EXR, HDR,
+# DDS, QOI, TGA, PNM, ICO, Farbfeld).
+image = { version = "0.25.9", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
+# Writes palette PNGs, which `image` cannot. Same version `image` already
+# pulls in, so no new crate.
+png = "0.18"
+# Lossless WebP encoding (`convert`, and `press` on WebP files). Already
+# pulled in by `image`, so no new crate.
+image-webp = "0.2"
 
 # Parallel image re-encoding
 rayon = "1.12"
@@ -73,7 +83,8 @@ j2k = { version = "0.9.0", optional = true }
 [dev-dependencies]
 # Same major/minor as the main deps, shared by tests/ and examples/ (corpus generator)
 lopdf = "0.44"
-image = "0.25"
+# No features of its own: tests decode with exactly the formats that ship.
+image = { version = "0.25", default-features = false }
 # Test-side inflate of flate-wrapped JPEG streams (lopdf cannot decode DCTDecode).
 flate2 = "1.1"
 

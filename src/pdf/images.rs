@@ -118,7 +118,7 @@ impl QualityMode {
 
     /// JPEG quality for one stream. `-ssim <1.0` maps the target through
     /// [`calibrated_quality`]; otherwise `-q` is used as given.
-    fn effective(&self) -> u8 {
+    pub(crate) fn effective(&self) -> u8 {
         match self.ssim {
             Some(target) => calibrated_quality(target),
             None => self.fixed,
@@ -620,11 +620,11 @@ enum Candidate {
 /// per pixel. The palette is first-seen-ordered for exact palettes and
 /// box-ordered for median-cut palettes — deterministic either way, so
 /// serial and parallel runs stay byte-identical.
-struct IndexedCandidate {
+pub(crate) struct IndexedCandidate {
     /// Palette table bytes, 3 per entry (`DeviceRGB`).
-    palette: Vec<u8>,
+    pub(crate) palette: Vec<u8>,
     /// Per-pixel palette indices, 1 byte each.
-    indices: Vec<u8>,
+    pub(crate) indices: Vec<u8>,
     /// `hival` = palette length − 1 (must fit one byte).
     hival: u8,
     /// Base color space name (always `DeviceRGB` today).
@@ -1727,7 +1727,7 @@ fn palette_eligible(stream: &Stream, color_space: Option<&[u8]>) -> bool {
 /// go through a deterministic median-cut quantizer and are accepted only
 /// above the native-image SSIM gate, so a lossy palette can never visibly
 /// degrade a figure.
-fn indexed_candidate(rgb: &[u8], width: u32, height: u32) -> Option<IndexedCandidate> {
+pub(crate) fn indexed_candidate(rgb: &[u8], width: u32, height: u32) -> Option<IndexedCandidate> {
     if rgb.len() < 3 {
         return None;
     }

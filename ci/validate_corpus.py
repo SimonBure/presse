@@ -102,6 +102,42 @@ def check_pdf(path):
     return problems
 
 
+def check_zip(src, out, tmp):
+    """Problems with a pressed archive: it must read back cleanly, keep
+    every entry in order, keep `mimetype` first and stored, keep non-media
+    content byte for byte, and hold valid PDFs. Signed inputs must come
+    back byte-identical."""
+    import zipfile
+
+    if not out.exists():
+        return ["no output produced"]
+    if "signed" in src.name:
+        return [] if out.read_bytes() == src.read_bytes() else ["signed archive was modified"]
+    problems = []
+    a, b = zipfile.ZipFile(src), zipfile.ZipFile(out)
+    if b.testzip() is not None:
+        problems.append(f"CRC error in {b.testzip()}")
+    if [i.filename for i in a.infolist()] != [i.filename for i in b.infolist()]:
+        problems.append("entry names or order changed")
+    first = b.infolist()[0]
+    if first.filename == "mimetype" and (first.compress_type != zipfile.ZIP_STORED or first.extra):
+        problems.append("mimetype is not first, stored and without extra field")
+    for x, y in zip(a.infolist(), b.infolist()):
+        before, after = a.read(x), b.read(y)
+        if after.startswith(b"%PDF-"):
+            inner = tmp / f"inner-{Path(y.filename).name}"
+            inner.write_bytes(after)
+            problems.extend(f"{y.filename}: {p}" for p in check_pdf(inner))
+        elif after[:8] == b"\x89PNG\r\n\x1a\n" or after[:3] == b"\xff\xd8\xff":
+            if after[:3] != before[:3]:
+                problems.append(f"{y.filename}: image format changed")
+        elif before != after:
+            problems.append(f"{y.filename}: content changed")
+    if out.stat().st_size > src.stat().st_size:
+        problems.append("output larger than input")
+    return problems
+
+
 class Report:
     def __init__(self):
         self.failures = []
@@ -213,7 +249,22 @@ def main():
         print(f"  {DIM}no image fixtures{RESET}")
     print()
 
-    # ---- 4. idempotence --------------------------------------------------
+    # ---- 4. ZIP-based documents ----------------------------------------
+    print("ZIP-based documents (read back with Python's zipfile, not presse)")
+    archives = sorted([*fixtures.glob("*.odt"), *fixtures.glob("*.zip")])
+    for f in archives:
+        out = tmp / f"press-{f.name}"
+        r = run([str(presse), "press", str(f), "-q", QUALITY, "-o", str(out)])
+        if r.returncode != 0:
+            rep.case(f"press {f.name}", [f"exit {r.returncode}: {r.stderr.strip()[:120]}"])
+            continue
+        note = f"{f.stat().st_size:>6} -> {out.stat().st_size:>6} B" if out.exists() else ""
+        rep.case(f"press {f.name}", check_zip(f, out, tmp), note)
+    if not archives:
+        print(f"  {DIM}no archive fixtures{RESET}")
+    print()
+
+    # ---- 5. idempotence --------------------------------------------------
     print("idempotence (compressing an output again must stay sound)")
     for f in pdfs[:3]:
         once, twice = tmp / f"i1-{f.name}", tmp / f"i2-{f.name}"

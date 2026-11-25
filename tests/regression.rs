@@ -3898,3 +3898,999 @@ fn font_subset_keeps_text_and_renders_identically() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Standalone images (`presse press` on JPEG / PNG)
+// ---------------------------------------------------------------------------
+
+fn jpeg_segment(marker: u8, payload: &[u8]) -> Vec<u8> {
+    let mut s = vec![0xFF, marker];
+    s.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+    s.extend_from_slice(payload);
+    s
+}
+
+/// A q95 JPEG of `rgb` with extra segments inserted right after SOI.
+fn jpeg_with_segments(rgb: &[u8], w: u32, h: u32, segments: &[Vec<u8>]) -> Vec<u8> {
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 95)
+        .encode(rgb, w, h, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    let mut out = jpeg[..2].to_vec();
+    for s in segments {
+        out.extend_from_slice(s);
+    }
+    out.extend_from_slice(&jpeg[2..]);
+    out
+}
+
+/// EXIF payload (after `Exif\0\0`): IFD0 with Make = "CamX" and Orientation.
+fn exif_with_make_and_orientation(orientation: u16) -> Vec<u8> {
+    let mut t = b"II*\0".to_vec();
+    t.extend_from_slice(&8u32.to_le_bytes());
+    t.extend_from_slice(&2u16.to_le_bytes());
+    t.extend_from_slice(&[0x0F, 0x01, 2, 0, 4, 0, 0, 0, b'C', b'a', b'm', b'X']);
+    t.extend_from_slice(&[0x12, 0x01, 3, 0, 1, 0, 0, 0]);
+    t.extend_from_slice(&orientation.to_le_bytes());
+    t.extend_from_slice(&[0, 0]);
+    t.extend_from_slice(&0u32.to_le_bytes());
+    t
+}
+
+fn exif_orientation_of(jpeg: &[u8]) -> Option<u16> {
+    let at = jpeg.windows(6).position(|w| w == b"Exif\0\0")? + 6;
+    let t = &jpeg[at..];
+    let le = &t[..2] == b"II";
+    let rd16 = |b: &[u8]| {
+        if le {
+            u16::from_le_bytes([b[0], b[1]])
+        } else {
+            u16::from_be_bytes([b[0], b[1]])
+        }
+    };
+    let ifd = if le {
+        u32::from_le_bytes(t[4..8].try_into().unwrap())
+    } else {
+        u32::from_be_bytes(t[4..8].try_into().unwrap())
+    } as usize;
+    (0..rd16(&t[ifd..]) as usize).find_map(|i| {
+        let e = ifd + 2 + i * 12;
+        (rd16(&t[e..]) == 0x0112).then(|| rd16(&t[e + 8..]))
+    })
+}
+
+fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut crc = flate2::Crc::new();
+    crc.update(kind);
+    crc.update(data);
+    let mut c = (data.len() as u32).to_be_bytes().to_vec();
+    c.extend_from_slice(kind);
+    c.extend_from_slice(data);
+    c.extend_from_slice(&crc.sum().to_be_bytes());
+    c
+}
+
+/// A fast-deflated RGB PNG of `rgb`, with `extra` chunks after IHDR.
+fn png_with_chunks(rgb: &[u8], w: u32, h: u32, extra: &[u8]) -> Vec<u8> {
+    use image::ImageEncoder;
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new_with_quality(
+        &mut png,
+        image::codecs::png::CompressionType::Fast,
+        image::codecs::png::FilterType::NoFilter,
+    )
+    .write_image(rgb, w, h, image::ExtendedColorType::Rgb8)
+    .unwrap();
+    let at = 8 + 25; // signature + IHDR
+    [&png[..at], extra, &png[at..]].concat()
+}
+
+#[test]
+fn press_cli_images_keep_format_and_metadata_policy() {
+    let dir = test_dir().join("img-cli");
+    std::fs::create_dir_all(dir.join("out")).unwrap();
+    let (w, h) = (320, 240);
+    let rgb = photoish_rgb(w, h);
+    let mut exif = b"Exif\0\0".to_vec();
+    exif.extend_from_slice(&exif_with_make_and_orientation(6));
+    let icc_payload = [b"ICC_PROFILE\0\x01\x01".as_slice(), &[0x5A; 300]].concat();
+    let jpeg = jpeg_with_segments(
+        &rgb,
+        w,
+        h,
+        &[
+            jpeg_segment(0xE1, &exif),
+            jpeg_segment(0xE2, &icc_payload),
+            jpeg_segment(0xFE, b"secret comment"),
+        ],
+    );
+    std::fs::write(dir.join("photo.jpg"), &jpeg).unwrap();
+
+    let (fw, fh) = (200, 150);
+    let figure = flat_figure_rgb(fw, fh);
+    let png = png_with_chunks(
+        &figure,
+        fw,
+        fh,
+        &png_chunk(b"tEXt", b"Comment\0secret text"),
+    );
+    std::fs::write(dir.join("figure.png"), &png).unwrap();
+
+    let status = Command::new(env!("CARGO_BIN_EXE_presse"))
+        .arg("press")
+        .arg(dir.join("photo.jpg"))
+        .arg(dir.join("figure.png"))
+        .arg("-o")
+        .arg(format!("{}/", dir.join("out").display()))
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let out_jpeg = std::fs::read(dir.join("out/photo_compressed.jpg")).unwrap();
+    assert!(
+        out_jpeg.len() < jpeg.len(),
+        "q80 re-encode of a q95 JPEG must shrink"
+    );
+    let decoded = image::load_from_memory(&out_jpeg).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (w, h));
+    assert_eq!(
+        exif_orientation_of(&out_jpeg),
+        Some(6),
+        "orientation must survive"
+    );
+    assert!(
+        !out_jpeg.windows(4).any(|x| x == b"CamX"),
+        "camera EXIF must be removed"
+    );
+    assert!(
+        !out_jpeg.windows(6).any(|x| x == b"secret"),
+        "comments must be removed"
+    );
+    assert!(
+        out_jpeg
+            .windows(icc_payload.len())
+            .any(|x| x == icc_payload),
+        "the ICC profile must be kept byte for byte"
+    );
+
+    let out_png = std::fs::read(dir.join("out/figure_compressed.png")).unwrap();
+    assert!(out_png.len() < png.len());
+    let decoded = image::load_from_memory(&out_png).unwrap().to_rgb8();
+    assert_eq!(
+        decoded.into_raw(),
+        figure,
+        "PNG compression must be lossless"
+    );
+    assert!(
+        !out_png.windows(4).any(|x| x == b"tEXt"),
+        "text chunks must be removed"
+    );
+}
+
+#[test]
+fn press_cli_keep_metadata_keeps_everything() {
+    let dir = test_dir().join("img-keep");
+    std::fs::create_dir_all(&dir).unwrap();
+    let rgb = photoish_rgb(160, 120);
+    let mut exif = b"Exif\0\0".to_vec();
+    exif.extend_from_slice(&exif_with_make_and_orientation(3));
+    let jpeg = jpeg_with_segments(
+        &rgb,
+        160,
+        120,
+        &[jpeg_segment(0xE1, &exif), jpeg_segment(0xFE, b"keep me")],
+    );
+    std::fs::write(dir.join("a.jpg"), &jpeg).unwrap();
+    let out = dir.join("a_out.jpg");
+    let status = Command::new(env!("CARGO_BIN_EXE_presse"))
+        .args(["press", "--keep-metadata", "-o"])
+        .arg(&out)
+        .arg(dir.join("a.jpg"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let out = std::fs::read(out).unwrap();
+    assert!(out.windows(4).any(|x| x == b"CamX"));
+    assert!(out.windows(7).any(|x| x == b"keep me"));
+    assert_eq!(exif_orientation_of(&out), Some(3));
+}
+
+#[test]
+fn press_cli_unchanged_image_is_copied_as_is() {
+    let dir = test_dir().join("img-unchanged");
+    std::fs::create_dir_all(&dir).unwrap();
+    let figure = flat_figure_rgb(120, 80);
+    std::fs::write(dir.join("f.png"), png_with_chunks(&figure, 120, 80, &[])).unwrap();
+    let presse = env!("CARGO_BIN_EXE_presse");
+    let run = |input: &Path, output: &Path| {
+        assert!(
+            Command::new(presse)
+                .arg("press")
+                .arg(input)
+                .arg("-o")
+                .arg(output)
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    run(&dir.join("f.png"), &dir.join("once.png"));
+    // Already optimal: the second run cannot do better and must copy it.
+    run(&dir.join("once.png"), &dir.join("twice.png"));
+    assert_eq!(
+        std::fs::read(dir.join("once.png")).unwrap(),
+        std::fs::read(dir.join("twice.png")).unwrap()
+    );
+}
+
+#[test]
+fn press_cli_mixed_batch_warns_once_about_pdf_only_flags() {
+    let dir = test_dir().join("img-mixed");
+    std::fs::create_dir_all(dir.join("out")).unwrap();
+    let (mut doc, pages_id) = new_doc();
+    add_image_page(&mut doc, pages_id, photoish_rgb(160, 160), 160, 160, false);
+    save_pdf(&mut doc, dir.join("doc.pdf").to_str().unwrap()).unwrap();
+    let rgb = photoish_rgb(96, 64);
+    std::fs::write(dir.join("a.jpg"), jpeg_with_segments(&rgb, 96, 64, &[])).unwrap();
+    std::fs::write(dir.join("b.jpg"), jpeg_with_segments(&rgb, 96, 64, &[])).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_presse"))
+        .arg("press")
+        .arg(dir.join("doc.pdf"))
+        .arg(dir.join("a.jpg"))
+        .arg(dir.join("b.jpg"))
+        .args(["-d", "150", "-o"])
+        .arg(format!("{}/", dir.join("out").display()))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr
+            .matches("--dpi only apply to PDFs; ignored for images")
+            .count(),
+        1,
+        "one warning per run, not per image: {stderr}"
+    );
+    assert_well_formed(&dir.join("out/doc_compressed.pdf"));
+    assert!(dir.join("out/a_compressed.jpg").exists());
+    assert!(dir.join("out/b_compressed.jpg").exists());
+}
+
+#[test]
+fn library_presser_detects_and_compresses() {
+    use presse::{Format, PdfOptions, PressOptions, Pressed, Presser, detect};
+    let rgb = photoish_rgb(128, 96);
+    let jpeg = jpeg_with_segments(&rgb, 128, 96, &[]);
+    assert_eq!(detect(&jpeg), Some(Format::Jpeg));
+    let presser = Presser::new(
+        PressOptions {
+            quality: 60,
+            ssim: None,
+            palette: false,
+            keep_metadata: false,
+            pdf: PdfOptions::default(),
+            verbose: false,
+        },
+        Acceleration::Cpu,
+        false,
+    )
+    .unwrap();
+    match presser.press(&jpeg).unwrap() {
+        Pressed::Bytes(bytes) => {
+            assert!(bytes.len() < jpeg.len());
+            assert_eq!(detect(&bytes), Some(Format::Jpeg));
+        }
+        _ => panic!("a q95 JPEG must come back as a smaller JPEG"),
+    }
+    assert!(presser.press(b"RIFF\0\0\0\0WEBPVP8 ").is_err());
+}
+
+// ---------------------------------------------------------------------------
+// `presse convert` to image formats
+// ---------------------------------------------------------------------------
+
+fn presse_convert(args: &[&std::ffi::OsStr]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_presse"))
+        .arg("convert")
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+/// A fake ICC profile: a 128-byte header whose color space field says RGB.
+fn fake_rgb_icc() -> Vec<u8> {
+    let mut icc = vec![0x11u8; 200];
+    icc[16..20].copy_from_slice(b"RGB ");
+    icc
+}
+
+fn png_iccp(png: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut i = 8;
+    while i + 8 <= png.len() {
+        let n = u32::from_be_bytes(png[i..i + 4].try_into().unwrap()) as usize;
+        let data = &png[i + 8..i + 8 + n];
+        if &png[i + 4..i + 8] == b"iCCP" {
+            let at = data.iter().position(|&b| b == 0)? + 2;
+            let mut out = Vec::new();
+            flate2::read::ZlibDecoder::new(&data[at..])
+                .read_to_end(&mut out)
+                .ok()?;
+            return Some(out);
+        }
+        i += 12 + n;
+    }
+    None
+}
+
+#[test]
+fn convert_cli_extension_or_to_picks_the_format() {
+    let dir = test_dir().join("conv-format");
+    std::fs::create_dir_all(dir.join("out")).unwrap();
+    let figure = flat_figure_rgb(90, 60);
+    std::fs::write(dir.join("f.png"), png_with_chunks(&figure, 90, 60, &[])).unwrap();
+
+    let o = presse_convert(&[
+        dir.join("f.png").as_os_str(),
+        "-o".as_ref(),
+        dir.join("f.webp").as_os_str(),
+    ]);
+    assert!(o.status.success());
+    let webp = std::fs::read(dir.join("f.webp")).unwrap();
+    assert_eq!(presse::detect(&webp), Some(presse::Format::WebP));
+    let back = image::load_from_memory(&webp).unwrap().to_rgb8().into_raw();
+    assert_eq!(back, figure, "WebP output is lossless");
+
+    let out_dir = format!("{}/", dir.join("out").display());
+    let o = presse_convert(&[
+        dir.join("f.png").as_os_str(),
+        "--to".as_ref(),
+        "jpg".as_ref(),
+        "-o".as_ref(),
+        out_dir.as_ref(),
+    ]);
+    assert!(o.status.success());
+    let jpeg = std::fs::read(dir.join("out/f.jpg")).unwrap();
+    assert_eq!(presse::detect(&jpeg), Some(presse::Format::Jpeg));
+
+    // No -o extension and no --to: PDF, as before.
+    let o = presse_convert(&[dir.join("f.png").as_os_str()]);
+    assert!(o.status.success());
+    assert_well_formed(&dir.join("f.pdf"));
+}
+
+#[test]
+fn convert_cli_rejects_conflicts_and_never_overwrites_inputs() {
+    let dir = test_dir().join("conv-rules");
+    std::fs::create_dir_all(&dir).unwrap();
+    let figure = flat_figure_rgb(30, 20);
+    let src = png_with_chunks(&figure, 30, 20, &[]);
+    std::fs::write(dir.join("g.png"), &src).unwrap();
+    let g = dir.join("g.png");
+
+    let conflict = presse_convert(&[
+        g.as_os_str(),
+        "-o".as_ref(),
+        dir.join("x.png").as_os_str(),
+        "--to".as_ref(),
+        "webp".as_ref(),
+    ]);
+    assert!(!conflict.status.success());
+    let unknown = presse_convert(&[g.as_os_str(), "-o".as_ref(), dir.join("x.tiff").as_os_str()]);
+    assert!(!unknown.status.success());
+    let merge = presse_convert(&[
+        g.as_os_str(),
+        "-m".as_ref(),
+        "--to".as_ref(),
+        "png".as_ref(),
+    ]);
+    assert!(!merge.status.success());
+
+    // g.png --to png would write g.png itself: written as g_1.png instead.
+    let same = presse_convert(&[g.as_os_str(), "--to".as_ref(), "png".as_ref()]);
+    assert!(same.status.success());
+    assert!(String::from_utf8_lossy(&same.stderr).contains("is one of the inputs"));
+    assert_eq!(std::fs::read(&g).unwrap(), src);
+    let g1 = image::open(dir.join("g_1.png")).unwrap().to_rgb8();
+    assert_eq!(g1.into_raw(), figure);
+}
+
+/// Width of the first image placed in a PDF.
+fn pdf_image_width(pdf: &Path) -> i64 {
+    let doc = Document::load(pdf).unwrap();
+    find_image_streams(&doc)[0]
+        .2
+        .get(b"Width")
+        .unwrap()
+        .as_i64()
+        .unwrap()
+}
+
+#[test]
+fn convert_cli_numbers_clashing_names_and_never_overwrites_inputs() {
+    let dir = test_dir().join("conv-names");
+    let _ = std::fs::remove_dir_all(&dir);
+    for sub in ["d1", "d2", "same"] {
+        std::fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    let solid = |w: u32| image::RgbImage::from_pixel(w, w, image::Rgb([w as u8, 0, 0]));
+    solid(10).save(dir.join("d1/a.png")).unwrap();
+    solid(20).save(dir.join("d2/a.png")).unwrap();
+    solid(30).save(dir.join("same/a.png")).unwrap();
+    solid(40).save(dir.join("same/a.bmp")).unwrap();
+    let path = |p: &str| dir.join(p).into_os_string();
+
+    // Same stem from two directories into one -o directory, created on the
+    // fly; a re-run overwrites its own outputs instead of numbering further.
+    for _ in 0..2 {
+        let run = presse_convert(&[
+            &path("d1/a.png"),
+            &path("d2/a.png"),
+            "-o".as_ref(),
+            &path("out/new/"),
+        ]);
+        assert!(run.status.success());
+        assert!(String::from_utf8_lossy(&run.stderr).contains("was already written by this run"));
+    }
+    let mut names: Vec<_> = std::fs::read_dir(dir.join("out/new"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["a.pdf", "a_1.pdf"]);
+    assert_eq!(pdf_image_width(&dir.join("out/new/a.pdf")), 10);
+    assert_eq!(pdf_image_width(&dir.join("out/new/a_1.pdf")), 20);
+
+    // Missing -o directories are created for merged and image output too.
+    let run = presse_convert(&[
+        &path("d1/a.png"),
+        &path("d2/a.png"),
+        "-m".as_ref(),
+        "-o".as_ref(),
+        &path("out/merged/all.pdf"),
+    ]);
+    assert!(run.status.success());
+    assert!(dir.join("out/merged/all.pdf").is_file());
+    let run = presse_convert(&[&path("d1/a.png"), "-o".as_ref(), &path("out/img/x.webp")]);
+    assert!(run.status.success());
+    assert!(dir.join("out/img/x.webp").is_file());
+
+    // Same stem, same directory, no -o: a.pdf, a_1.pdf, in input order.
+    let run = presse_convert(&[&path("same/a.png"), &path("same/a.bmp")]);
+    assert!(run.status.success());
+    assert_eq!(pdf_image_width(&dir.join("same/a.pdf")), 30);
+    assert_eq!(pdf_image_width(&dir.join("same/a_1.pdf")), 40);
+
+    // a.png --to webp would land on the input a.webp, which is read later:
+    // a.webp stays untouched, its own conversion goes to a_2.webp.
+    let mut webp = Vec::new();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut webp)
+        .encode(solid(50).as_raw(), 50, 50, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    std::fs::write(dir.join("same/a.webp"), &webp).unwrap();
+    let run = presse_convert(&[
+        &path("same/a.png"),
+        &path("same/a.webp"),
+        "-t".as_ref(),
+        "webp".as_ref(),
+    ]);
+    assert!(run.status.success());
+    assert_eq!(std::fs::read(dir.join("same/a.webp")).unwrap(), webp);
+    assert_eq!(image::open(dir.join("same/a_1.webp")).unwrap().width(), 30);
+    assert_eq!(image::open(dir.join("same/a_2.webp")).unwrap().width(), 50);
+}
+
+#[test]
+fn convert_cli_carries_icc_and_orientation_and_warns_when_larger() {
+    let dir = test_dir().join("conv-meta");
+    std::fs::create_dir_all(&dir).unwrap();
+    let rgb = photoish_rgb(64, 48);
+    let icc = fake_rgb_icc();
+    let mut exif = b"Exif\0\0".to_vec();
+    exif.extend_from_slice(&exif_with_make_and_orientation(6));
+    let jpeg = jpeg_with_segments(
+        &rgb,
+        64,
+        48,
+        &[
+            jpeg_segment(0xE1, &exif),
+            jpeg_segment(0xE2, &[b"ICC_PROFILE\0\x01\x01".as_slice(), &icc].concat()),
+        ],
+    );
+    std::fs::write(dir.join("p.jpg"), &jpeg).unwrap();
+
+    let o = presse_convert(&[
+        dir.join("p.jpg").as_os_str(),
+        "-o".as_ref(),
+        dir.join("p.png").as_os_str(),
+    ]);
+    assert!(o.status.success());
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("is larger than"),
+        "a photo JPEG as lossless PNG is larger, and says so"
+    );
+    let png = std::fs::read(dir.join("p.png")).unwrap();
+    assert_eq!(png_iccp(&png), Some(icc.clone()), "ICC profile kept");
+    let exif_at = png
+        .windows(4)
+        .position(|w| w == b"eXIf")
+        .expect("eXIf chunk")
+        + 4;
+    let mut as_jpeg_exif = b"Exif\0\0".to_vec();
+    as_jpeg_exif.extend_from_slice(&png[exif_at..]);
+    assert_eq!(
+        exif_orientation_of(&as_jpeg_exif),
+        Some(6),
+        "orientation kept"
+    );
+    assert!(!png.windows(4).any(|w| w == b"CamX"), "other EXIF dropped");
+
+    let o = presse_convert(&[
+        dir.join("p.jpg").as_os_str(),
+        "-o".as_ref(),
+        dir.join("p.webp").as_os_str(),
+    ]);
+    assert!(o.status.success());
+    let webp = std::fs::read(dir.join("p.webp")).unwrap();
+    assert!(webp.windows(4).any(|w| w == b"ICCP"));
+    assert!(webp.windows(icc.len()).any(|w| w == icc.as_slice()));
+}
+
+fn webp_chunk(tag: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut c = tag.to_vec();
+    c.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    c.extend_from_slice(data);
+    if data.len() % 2 == 1 {
+        c.push(0);
+    }
+    c
+}
+
+fn webp_file(chunks: &[Vec<u8>]) -> Vec<u8> {
+    let body = chunks.concat();
+    let mut out = b"RIFF".to_vec();
+    out.extend_from_slice(&(body.len() as u32 + 4).to_le_bytes());
+    out.extend_from_slice(b"WEBP");
+    out.extend_from_slice(&body);
+    out
+}
+
+#[test]
+fn press_cli_webp_strips_metadata_and_stays_lossless() {
+    use image::ImageDecoder;
+    let dir = test_dir().join("img-webp");
+    std::fs::create_dir_all(dir.join("out")).unwrap();
+    let (w, h) = (96, 64);
+    let figure = flat_figure_rgb(w, h);
+    let mut simple = Vec::new();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut simple)
+        .encode(&figure, w, h, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    assert_eq!(&simple[12..16], b"VP8L");
+    let size = u32::from_le_bytes(simple[16..20].try_into().unwrap()) as usize;
+    let vp8l = &simple[20..20 + size];
+
+    // VP8X with ICC + EXIF + XMP flags and the canvas size.
+    let mut vp8x = vec![0x20 | 0x08 | 0x04, 0, 0, 0];
+    vp8x.extend_from_slice(&(w - 1).to_le_bytes()[..3]);
+    vp8x.extend_from_slice(&(h - 1).to_le_bytes()[..3]);
+    let icc = fake_rgb_icc();
+    let input = webp_file(&[
+        webp_chunk(b"VP8X", &vp8x),
+        webp_chunk(b"ICCP", &icc),
+        webp_chunk(b"VP8L", vp8l),
+        webp_chunk(b"EXIF", &exif_with_make_and_orientation(6)),
+        webp_chunk(b"XMP ", b"<x:xmpmeta>secret</x:xmpmeta>"),
+    ]);
+    std::fs::write(dir.join("fig.webp"), &input).unwrap();
+
+    let status = Command::new(env!("CARGO_BIN_EXE_presse"))
+        .arg("press")
+        .arg(dir.join("fig.webp"))
+        .arg("-o")
+        .arg(format!("{}/", dir.join("out").display()))
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let out = std::fs::read(dir.join("out/fig_compressed.webp")).unwrap();
+    assert!(out.len() < input.len());
+    assert!(!out.windows(4).any(|x| x == b"CamX"), "camera EXIF removed");
+    assert!(!out.windows(6).any(|x| x == b"secret"), "XMP removed");
+    let mut decoder = image::ImageReader::new(std::io::Cursor::new(&out))
+        .with_guessed_format()
+        .unwrap()
+        .into_decoder()
+        .unwrap();
+    assert_eq!(decoder.icc_profile().unwrap(), Some(icc), "ICC kept");
+    assert_eq!(
+        decoder.orientation().unwrap(),
+        image::metadata::Orientation::Rotate90,
+        "orientation 6 kept"
+    );
+    let decoded = image::DynamicImage::from_decoder(decoder).unwrap();
+    assert_eq!(decoded.to_rgb8().into_raw(), figure, "lossless");
+}
+
+fn pdf_with_pages(path: &Path, pages: usize) {
+    let (mut doc, pages_id) = new_doc();
+    for _ in 0..pages {
+        add_image_page(&mut doc, pages_id, photoish_rgb(64, 64), 64, 64, false);
+    }
+    save_pdf(&mut doc, path.to_str().unwrap()).unwrap();
+}
+
+fn page_count(pdf: &Path) -> usize {
+    Document::load(pdf).unwrap().get_pages().len()
+}
+
+#[test]
+fn press_cli_numbers_clashing_names_and_still_works_in_place() {
+    let dir = test_dir().join("press-names");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("d1")).unwrap();
+    std::fs::create_dir_all(dir.join("d2")).unwrap();
+    pdf_with_pages(&dir.join("d1/a.pdf"), 1);
+    pdf_with_pages(&dir.join("d2/a.pdf"), 2);
+    let press = |args: &[&std::ffi::OsStr]| {
+        Command::new(env!("CARGO_BIN_EXE_presse"))
+            .arg("press")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let path = |p: &str| dir.join(p).into_os_string();
+
+    // Same stem from two directories into a -o directory that does not
+    // exist yet; a re-run overwrites its own outputs.
+    for _ in 0..2 {
+        let run = press(&[
+            &path("d1/a.pdf"),
+            &path("d2/a.pdf"),
+            "-o".as_ref(),
+            &path("out/new/"),
+        ]);
+        assert!(run.status.success());
+        assert!(String::from_utf8_lossy(&run.stderr).contains("was already written by this run"));
+    }
+    let mut names: Vec<_> = std::fs::read_dir(dir.join("out/new"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["a_compressed.pdf", "a_compressed_1.pdf"]);
+    assert_eq!(page_count(&dir.join("out/new/a_compressed.pdf")), 1);
+    assert_eq!(page_count(&dir.join("out/new/a_compressed_1.pdf")), 2);
+
+    // a.pdf's default output is the next input: that input stays untouched.
+    std::fs::copy(dir.join("d2/a.pdf"), dir.join("d1/a_compressed.pdf")).unwrap();
+    let before = std::fs::read(dir.join("d1/a_compressed.pdf")).unwrap();
+    let run = press(&[&path("d1/a.pdf"), &path("d1/a_compressed.pdf")]);
+    assert!(run.status.success());
+    assert!(String::from_utf8_lossy(&run.stderr).contains("is one of the inputs"));
+    assert_eq!(
+        std::fs::read(dir.join("d1/a_compressed.pdf")).unwrap(),
+        before
+    );
+    assert_eq!(page_count(&dir.join("d1/a_compressed_1.pdf")), 1);
+    assert_eq!(page_count(&dir.join("d1/a_compressed_compressed.pdf")), 2);
+
+    // -o naming the input itself is in-place compression, not a clash.
+    std::fs::copy(dir.join("d2/a.pdf"), dir.join("inplace.pdf")).unwrap();
+    let size = std::fs::metadata(dir.join("inplace.pdf")).unwrap().len();
+    let run = press(&[&path("inplace.pdf"), "-o".as_ref(), &path("inplace.pdf")]);
+    assert!(run.status.success());
+    assert!(!String::from_utf8_lossy(&run.stderr).contains("warning"));
+    assert!(std::fs::metadata(dir.join("inplace.pdf")).unwrap().len() < size);
+    assert!(!dir.join("inplace_1.pdf").exists());
+    assert_eq!(page_count(&dir.join("inplace.pdf")), 2);
+}
+
+#[test]
+fn merge_cli_creates_missing_output_dirs() {
+    let dir = test_dir().join("merge-dirs");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    pdf_with_pages(&dir.join("a.pdf"), 1);
+    pdf_with_pages(&dir.join("b.pdf"), 2);
+    let out = dir.join("x/y/merged.pdf");
+    let status = Command::new(env!("CARGO_BIN_EXE_presse"))
+        .arg("merge")
+        .arg(dir.join("a.pdf"))
+        .arg(dir.join("b.pdf"))
+        .arg("-o")
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(page_count(&out), 3);
+}
+
+/// A one-image PDF with a signature field; `signed` fills it with a
+/// signature dictionary (structure only: detection never checks the
+/// cryptography).
+fn pdf_with_signature_field(signed: bool) -> Document {
+    let (mut doc, pages_id) = new_doc();
+    add_image_page(&mut doc, pages_id, photoish_rgb(160, 120), 160, 120, false);
+    let mut field = dictionary! {
+        "FT" => "Sig",
+        "T" => Object::string_literal("Sig1"),
+        "Subtype" => "Widget",
+        "Rect" => vec![0.into(), 0.into(), 0.into(), 0.into()],
+    };
+    if signed {
+        let sig = doc.add_object(dictionary! {
+            "Type" => "Sig",
+            "Filter" => "Adobe.PPKLite",
+            "SubFilter" => "adbe.pkcs7.detached",
+            "ByteRange" => vec![0.into(), 100.into(), 200.into(), 300.into()],
+            "Contents" => Object::String(vec![0; 64], lopdf::StringFormat::Hexadecimal),
+        });
+        field.set("V", sig);
+    }
+    let field_id = doc.add_object(field);
+    let root = doc.trailer.get(b"Root").unwrap().as_reference().unwrap();
+    doc.get_object_mut(root)
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set(
+            "AcroForm",
+            dictionary! { "Fields" => vec![field_id.into()] },
+        );
+    doc
+}
+
+#[test]
+fn press_keeps_signed_pdfs_byte_identical() {
+    use presse::{PdfOptions, PressOptions, Pressed, Presser};
+    let dir = test_dir().join("signed");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    save_pdf(
+        &mut pdf_with_signature_field(true),
+        dir.join("signed.pdf").to_str().unwrap(),
+    )
+    .unwrap();
+    save_pdf(
+        &mut pdf_with_signature_field(false),
+        dir.join("empty-field.pdf").to_str().unwrap(),
+    )
+    .unwrap();
+
+    let run = Command::new(env!("CARGO_BIN_EXE_presse"))
+        .arg("press")
+        .arg(dir.join("signed.pdf"))
+        .arg(dir.join("empty-field.pdf"))
+        .arg("-o")
+        .arg(format!("{}/", dir.join("out").display()))
+        .output()
+        .unwrap();
+    assert!(run.status.success());
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("signed.pdf: kept unchanged (signed PDF"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("empty-field.pdf: kept unchanged"),
+        "{stderr}"
+    );
+
+    let signed = std::fs::read(dir.join("signed.pdf")).unwrap();
+    assert_eq!(
+        std::fs::read(dir.join("out/signed_compressed.pdf")).unwrap(),
+        signed,
+        "a signed PDF must be copied byte for byte"
+    );
+    // An empty signature field signs nothing: compressed as usual.
+    let empty = std::fs::metadata(dir.join("empty-field.pdf"))
+        .unwrap()
+        .len();
+    let out = dir.join("out/empty-field_compressed.pdf");
+    assert!(std::fs::metadata(&out).unwrap().len() < empty);
+    assert_well_formed(&out);
+
+    let presser = Presser::new(
+        PressOptions {
+            quality: 80,
+            ssim: None,
+            palette: false,
+            keep_metadata: false,
+            pdf: PdfOptions::default(),
+            verbose: false,
+        },
+        Acceleration::Cpu,
+        false,
+    )
+    .unwrap();
+    assert!(matches!(
+        presser.press(&signed).unwrap(),
+        Pressed::Untouched(_)
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// ZIP-based documents (`presse press` on ODT, DOCX, EPUB, ZIP…)
+// ---------------------------------------------------------------------------
+
+/// A ZIP of `(name, content, deflate)`, written independently of presse
+/// (deflate level 1, no extra fields).
+fn zip_of(files: &[(&str, &[u8], bool)]) -> Vec<u8> {
+    use std::io::Write;
+    let (mut out, mut central) = (Vec::new(), Vec::new());
+    for (name, content, deflate) in files {
+        let data = if *deflate {
+            let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(1));
+            e.write_all(content).unwrap();
+            e.finish().unwrap()
+        } else {
+            content.to_vec()
+        };
+        let mut crc = flate2::Crc::new();
+        crc.update(content);
+        let method: u16 = if *deflate { 8 } else { 0 };
+        let offset = out.len() as u32;
+        let common = |v: &mut Vec<u8>| {
+            v.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            v.extend_from_slice(&0u16.to_le_bytes()); // flags
+            v.extend_from_slice(&method.to_le_bytes());
+            v.extend_from_slice(&[0, 0x60, 0x21, 0x5a]); // time, date
+            v.extend_from_slice(&crc.sum().to_le_bytes());
+            v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            v.extend_from_slice(&(content.len() as u32).to_le_bytes());
+            v.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            v.extend_from_slice(&0u16.to_le_bytes()); // extra length
+        };
+        out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        common(&mut out);
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&data);
+        central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        central.extend_from_slice(&20u16.to_le_bytes()); // version made by
+        common(&mut central);
+        // Comment length, disk number, internal and external attributes.
+        central.extend_from_slice(&[0; 10]);
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+    }
+    let (cd_offset, cd_size) = (out.len() as u32, central.len() as u32);
+    out.extend_from_slice(&central);
+    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&(files.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(files.len() as u16).to_le_bytes());
+    out.extend_from_slice(&cd_size.to_le_bytes());
+    out.extend_from_slice(&cd_offset.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}
+
+/// `(name, method, content)` of every entry, read from the central
+/// directory, checking each CRC.
+fn zip_entries(zip: &[u8]) -> Vec<(String, u16, Vec<u8>)> {
+    use std::io::Read;
+    let u16_at = |a: usize| u16::from_le_bytes([zip[a], zip[a + 1]]) as usize;
+    let u32_at = |a: usize| u32::from_le_bytes(zip[a..a + 4].try_into().unwrap()) as usize;
+    let end = (0..=zip.len() - 22)
+        .rev()
+        .find(|&a| zip[a..a + 4] == [0x50, 0x4b, 5, 6])
+        .unwrap();
+    let mut at = u32_at(end + 16);
+    let mut out = Vec::new();
+    for _ in 0..u16_at(end + 10) {
+        assert_eq!(&zip[at..at + 4], [0x50, 0x4b, 1, 2]);
+        let (method, crc, size) = (u16_at(at + 10), u32_at(at + 16), u32_at(at + 20));
+        let (n, m, k) = (u16_at(at + 28), u16_at(at + 30), u16_at(at + 32));
+        let name = String::from_utf8(zip[at + 46..at + 46 + n].to_vec()).unwrap();
+        let local = u32_at(at + 42);
+        let start = local + 30 + u16_at(local + 26) + u16_at(local + 28);
+        let raw = &zip[start..start + size];
+        let content = if method == 8 {
+            let mut v = Vec::new();
+            flate2::read::DeflateDecoder::new(raw)
+                .read_to_end(&mut v)
+                .unwrap();
+            v
+        } else {
+            raw.to_vec()
+        };
+        let mut c = flate2::Crc::new();
+        c.update(&content);
+        assert_eq!(c.sum() as usize, crc, "{name}: CRC");
+        out.push((name, method as u16, content));
+        at += 46 + n + m + k;
+    }
+    out
+}
+
+#[test]
+fn press_cli_rebuilds_zip_documents_and_keeps_signed_ones() {
+    let dir = test_dir().join("zip-docs");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let figure = flat_figure_rgb(120, 80);
+    let png = png_with_chunks(&figure, 120, 80, &[]);
+    let photo = jpeg_with_segments(&photoish_rgb(160, 120), 160, 120, &[]);
+    let xml = b"<office:text>presse keeps XML byte for byte</office:text>".repeat(60);
+    let odt = zip_of(&[
+        (
+            "mimetype",
+            b"application/vnd.oasis.opendocument.text",
+            false,
+        ),
+        ("content.xml", &xml, true),
+        ("Pictures/figure.png", &png, false),
+        ("Pictures/photo.jpg", &photo, false),
+    ]);
+    std::fs::write(dir.join("doc.odt"), &odt).unwrap();
+    let signed = zip_of(&[
+        (
+            "mimetype",
+            b"application/vnd.oasis.opendocument.text",
+            false,
+        ),
+        ("content.xml", &xml, false),
+        ("META-INF/documentsignatures.xml", b"<signatures/>", false),
+    ]);
+    std::fs::write(dir.join("signed.odt"), &signed).unwrap();
+    let (mut doc, pages_id) = new_doc();
+    add_image_page(&mut doc, pages_id, photoish_rgb(200, 150), 200, 150, false);
+    let pdf_path = dir.join("inner.pdf");
+    save_pdf(&mut doc, pdf_path.to_str().unwrap()).unwrap();
+    let pdf = std::fs::read(&pdf_path).unwrap();
+    std::fs::write(dir.join("pdfs.zip"), zip_of(&[("inner.pdf", &pdf, false)])).unwrap();
+
+    // -d applies to the PDF inside the ZIP, so no "only apply to PDFs".
+    let run = Command::new(env!("CARGO_BIN_EXE_presse"))
+        .arg("press")
+        .arg(dir.join("doc.odt"))
+        .arg(dir.join("signed.odt"))
+        .arg(dir.join("pdfs.zip"))
+        .args(["-d", "150", "-o"])
+        .arg(format!("{}/", dir.join("out").display()))
+        .output()
+        .unwrap();
+    assert!(run.status.success());
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(!stderr.contains("only apply to PDFs"), "{stderr}");
+    assert!(
+        stderr.contains("signed.odt: kept unchanged (signed document"),
+        "{stderr}"
+    );
+
+    let out = std::fs::read(dir.join("out/doc_compressed.odt")).unwrap();
+    assert!(out.len() < odt.len());
+    let entries = zip_entries(&out);
+    let names: Vec<_> = entries.iter().map(|e| e.0.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "mimetype",
+            "content.xml",
+            "Pictures/figure.png",
+            "Pictures/photo.jpg"
+        ]
+    );
+    assert_eq!(entries[0].1, 0, "mimetype stays stored");
+    assert_eq!(entries[1].2, xml, "XML content is untouched");
+    let figure_out = image::load_from_memory(&entries[2].2).unwrap().to_rgb8();
+    assert_eq!(figure_out.into_raw(), figure, "PNG stays lossless");
+    assert!(
+        entries[3].2.len() < photo.len(),
+        "the q95 JPEG is re-encoded"
+    );
+
+    assert_eq!(
+        std::fs::read(dir.join("out/signed_compressed.odt")).unwrap(),
+        signed
+    );
+
+    let zipped = std::fs::read(dir.join("out/pdfs_compressed.zip")).unwrap();
+    let inner = &zip_entries(&zipped)[0].2;
+    assert!(inner.len() < pdf.len());
+    let inner_path = dir.join("out/inner.pdf");
+    std::fs::write(&inner_path, inner).unwrap();
+    assert_well_formed(&inner_path);
+}
