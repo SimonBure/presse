@@ -197,7 +197,7 @@ impl Raster {
     /// 16-bit samples whose two bytes are equal are exactly the 8-bit
     /// value ×257: storing the high byte loses nothing.
     fn reduce_depth(&mut self) {
-        if self.sixteen && self.data.chunks_exact(2).all(|s| s[0] == s[1]) {
+        if self.sixteen && self.data.as_chunks::<2>().0.iter().all(|[hi, lo]| hi == lo) {
             self.data = self.data.iter().step_by(2).copied().collect();
             self.sixteen = false;
         }

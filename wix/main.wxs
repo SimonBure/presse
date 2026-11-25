@@ -69,7 +69,7 @@
 
         <Package Id='*'
             Keywords='Installer'
-            Description='Fast PDF compression CLI — JPEG recompression and structural optimization'
+            Description='Fast compression CLI for PDF, JPEG, PNG, WebP and ZIP-based documents (ODT, DOCX, EPUB) — image recompression and structural optimization'
             Manufacturer='Simon Buré'
             InstallerVersion='450'
             Languages='1033'

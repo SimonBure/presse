@@ -995,8 +995,8 @@ impl GpuState {
 
             // First sync: every slot's decode + encode + size query has
             // completed, so the sizes are valid.
-            for k in 0..n {
-                sync_stream(self.streams[k])?;
+            for &stream in &self.streams[..n] {
+                sync_stream(stream)?;
             }
 
             // Copy the bitstreams out (pinned pool), then one more sync.
@@ -1004,8 +1004,8 @@ impl GpuState {
                 let dst = self.pinned_buf(k, *size).as_mut_ptr();
                 self.enqueue_bitstream_copy(k, k, dst, size)?;
             }
-            for k in 0..n {
-                sync_stream(self.streams[k])?;
+            for &stream in &self.streams[..n] {
+                sync_stream(stream)?;
             }
 
             for (k, &job) in chunk.iter().enumerate() {
